@@ -15,7 +15,7 @@ geodata-plot = "python sp26_gke/plotting/geodata/generate_figures.py"
 gke-dummy-job = "python -m sp26_gke.workflows.gke_dummy_job"
 
 [dependencies]
-python = ">=3.12"
+python = ">=3.12,<3.14"
 pip = "*"
 
 [feature.py_utilities.dependencies]
