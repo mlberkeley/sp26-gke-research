@@ -2,4 +2,4 @@
 
 
 def hello() -> str:
-    return "sp26-google-gke-social-media"
+    return "sp26-google-gke-research"

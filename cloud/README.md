@@ -4,6 +4,8 @@ Terraform for GCP/GKE lives in this directory.
 
 Use Make targets only; GCP auth/setup is automated.
 
+Current project scope in this repo: Track 3+4 research agent runtime (self-healing, persistence, and snapshot/pause-resume exploration).
+
 Secrets workflow uses SOPS:
 
 1. Non-sensitive Terraform config goes in `cloud/config.auto.tfvars` (copy from `cloud/config.auto.tfvars.example`).
@@ -43,3 +45,9 @@ Dummy workload starter on GKE:
 
 For this starter, plain manifests are intentional. Move to Helm once you need environment-specific values, chart versioning, or multiple deployable workloads.
 If `gke-gcloud-auth-plugin` is missing, Make falls back to short-lived access-token auth for kubectl.
+
+Track 3+4 implementation notes:
+
+1. Keep the dummy workflow as a deployment smoke test while integrating the real research loop.
+2. Add persistent checkpoint storage before failure-drill testing.
+3. Add explicit restart/retry policy and verify resume behavior by deleting the active pod during a run.

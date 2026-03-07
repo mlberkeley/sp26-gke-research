@@ -18,19 +18,19 @@ variable "zone" {
 variable "cluster_name" {
   description = "Name of the GKE cluster."
   type        = string
-  default     = "social-media-agent"
+  default     = "research-agent"
 }
 
 variable "network_name" {
   description = "VPC network name."
   type        = string
-  default     = "social-media-vpc"
+  default     = "research-vpc"
 }
 
 variable "subnetwork_name" {
   description = "Subnet name."
   type        = string
-  default     = "social-media-subnet"
+  default     = "research-subnet"
 }
 
 variable "subnetwork_cidr" {

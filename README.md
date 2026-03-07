@@ -1,4 +1,4 @@
-# Market/Social Media Trend Analyst Agent
+# Autonomous Technical Research Agent
 
 ### Machine Learning @ Berkeley · Spring 2026 · Google GKE
 
@@ -7,31 +7,38 @@ Timeline: March 2, 2026 - May 4, 2026 (Spring Break: March 23-27, 2026)
 
 ## 👥 Contributors
 
-- `Alon Ragoler` 🎓
-- `Annie Lauren Yun` 🎓
-- `Robin Holzinger` 🎓
+- `Jaansi Parsa` 🎓
+- `Sanjana Ryali` 🎓
+- `Robin Holzinger` (PM) 🎓
 
 ## 📘 Overview
 
-Build a long-running agent on GKE that monitors social/news feeds and produces periodic sentiment and trend reports.
+Build a long-running autonomous research agent on GKE (Option A) that investigates technical topics and generates structured Markdown briefings.
+
+Primary stretch focus for this team:
+
+- Track 3: Self-Healing & Persistence
+- Track 4: Agent Persistence & State (Pod Snapshots)
 
 ## 🎯 Key Deliverables
 
 - Stable single-agent runtime on GKE
+- Pod restart/preemption recovery (checkpoint resume or automatic retry)
+- Snapshot/pause-resume prototype findings for long-running agent state
 - Demo-ready workflow (10-15 minute reproducible demo)
 - Final architecture diagram and concise findings report
 
 ## 🌐 Repository
 
-🔗 [github.com/robinholzi/sp26-google-gke-social-media](https://github.com/robinholzi/sp26-google-gke-social-media)
+🔗 [github.com/robinholzi/sp26-google-gke-research](https://github.com/robinholzi/sp26-google-gke-research)
 
 ## 🚀 Setup
 
 1. Clone the repository:
 
    ```bash
-   git clone https://github.com/robinholzi/sp26-google-gke-social-media.git
-   cd sp26-google-gke-social-media
+   git clone https://github.com/robinholzi/sp26-google-gke-research.git
+   cd sp26-google-gke-research
    ```
 
 2. Install [pixi](https://pixi.sh) if you haven't already:
@@ -99,7 +106,7 @@ make GCLOUD_LOGIN_FLAGS=--no-launch-browser tf-plan
 
 ## 🤖 Dummy GKE Workflow Starter
 
-This repo includes a minimal Python workflow starter that runs on GKE:
+This repo includes a minimal Python workflow starter that runs on GKE and serves as the base to integrate the Track 3+4 research loop:
 
 - Python entrypoint: `sp26_gke.workflows.gke_dummy_job`
 - Pixi task: `pixi run gke-dummy-job`

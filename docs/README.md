@@ -1,15 +1,9 @@
 # Documentation
 
-This directory serves as the documentation for this project.
+This directory contains Track Group 3+4 documentation for the Spring 2026 Google x ML@Berkeley collaboration.
 
-Please put any diagrams, notes, and other documentation here.
+## Notes
 
-e.g. you can use Mermaid to create diagrams like this:
-
-```mermaid
-graph TD
-    A[Start] --> B{Is it working?}
-    B -- Yes --> C[Great!]
-    B -- No --> D[Debug it!]
-    D --> B
-```
+- Keep docs concise and demo-oriented.
+- Prefer reproducible runbook steps over narrative.
+- Record concrete dates when updating timeline or milestones.

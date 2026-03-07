@@ -1,5 +1,5 @@
 [workspace]
-name = "sp26-google-gke-social-media"
+name = "sp26-google-gke-research"
 channels = ["conda-forge"]
 platforms = ["linux-64", "linux-aarch64", "osx-arm64", "osx-64"]
 
