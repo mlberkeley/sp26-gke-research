@@ -1,0 +1,26 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gke-research-agent-once
+  namespace: __NAMESPACE__
+  labels:
+    app: gke-research-agent
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: gke-research-agent
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: research-agent
+          image: __IMAGE__
+          imagePullPolicy: Always
+          env:
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: research-agent-secrets
+                  key: gemini-api-key

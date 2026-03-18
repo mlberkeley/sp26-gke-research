@@ -24,7 +24,7 @@ GCP_REQUIRED_SERVICES := compute.googleapis.com container.googleapis.com cloudkm
 KMS_GRANT_MEMBER ?=
 KMS_GRANT_MEMBERS_CSV ?= robin.holzinger@berkeley.edu
 GKE_CLUSTER_NAME ?= research-agent
-GKE_CLUSTER_REGION ?= us-central1
+GKE_CLUSTER_ZONE ?= us-central1-a
 GKE_NAMESPACE ?= default
 GKE_DUMMY_AR_REGION ?= us-central1
 GKE_DUMMY_AR_REPOSITORY ?= gke-workflows
@@ -32,6 +32,12 @@ GKE_DUMMY_IMAGE ?= $(GKE_DUMMY_AR_REGION)-docker.pkg.dev/$(PROJECT_ID)/$(GKE_DUM
 GKE_DUMMY_DOCKERFILE ?= cloud/docker/gke-dummy.Dockerfile
 GKE_DUMMY_DOCKER_PLATFORM ?= linux/amd64
 GKE_DUMMY_MANIFEST_DIR ?= cloud/k8s/dummy-workflow
+GKE_RESEARCH_AR_REGION ?= us-central1
+GKE_RESEARCH_AR_REPOSITORY ?= gke-workflows
+GKE_RESEARCH_IMAGE ?= $(GKE_RESEARCH_AR_REGION)-docker.pkg.dev/$(PROJECT_ID)/$(GKE_RESEARCH_AR_REPOSITORY)/gke-research-agent:latest
+GKE_RESEARCH_DOCKERFILE ?= cloud/docker/gke-research.Dockerfile
+GKE_RESEARCH_DOCKER_PLATFORM ?= linux/amd64
+GKE_RESEARCH_MANIFEST_DIR ?= cloud/k8s/research-workflow
 
 GCLOUD_CONFIG_ABS := $(abspath $(GCLOUD_CONFIG_DIR))
 ADMIN_GCLOUD_CONFIG_ABS := $(abspath $(ADMIN_GCLOUD_CONFIG_DIR))
@@ -50,6 +56,7 @@ KUBECTL := CLOUDSDK_CONFIG=$(GCLOUD_CONFIG_ABS) pixi run kubectl
 	gcp-auth gcp-project gcp-adc-quota gcp-enable-services gcp-kms-bootstrap gcp-init gcp-docker-auth gcp-artifact-registry-repo \
 	gcp-admin-auth gcp-admin-project gcp-admin-kms-create-keyring gcp-admin-kms-create-key gcp-admin-kms-grant-user gcp-admin-kms-setup \
 	gke-auth gke-namespace gke-dummy-build gke-dummy-push gke-dummy-run-once gke-dummy-schedule gke-dummy-delete gke-dummy-logs \
+	gke-research-build gke-research-push gke-research-run-once gke-research-schedule gke-research-delete gke-research-logs \
 	logout
 
 # ------------------------------------------------------------------------------------ #
@@ -178,8 +185,9 @@ gcp-kms-bootstrap: gcp-enable-services
 	if echo "$$ACCOUNT" | grep -q 'gserviceaccount.com$$'; then MEMBER="serviceAccount:$$ACCOUNT"; else MEMBER="user:$$ACCOUNT"; fi; \
 	($(GCLOUD) kms keyrings describe "$(SOPS_KMS_KEYRING)" --location "$(SOPS_KMS_LOCATION)" >/dev/null 2>&1 || $(GCLOUD) kms keyrings create "$(SOPS_KMS_KEYRING)" --location "$(SOPS_KMS_LOCATION)") && \
 	($(GCLOUD) kms keys describe "$(SOPS_KMS_KEY)" --keyring "$(SOPS_KMS_KEYRING)" --location "$(SOPS_KMS_LOCATION)" >/dev/null 2>&1 || $(GCLOUD) kms keys create "$(SOPS_KMS_KEY)" --keyring "$(SOPS_KMS_KEYRING)" --location "$(SOPS_KMS_LOCATION)" --purpose "encryption") && \
-	$(GCLOUD) kms keys add-iam-policy-binding "$(SOPS_KMS_KEY)" --keyring "$(SOPS_KMS_KEYRING)" --location "$(SOPS_KMS_LOCATION)" --member "$$MEMBER" --role "roles/cloudkms.cryptoKeyEncrypterDecrypter" && \
-	echo "KMS key ready and IAM binding applied for $$MEMBER."
+	($(GCLOUD) kms keys add-iam-policy-binding "$(SOPS_KMS_KEY)" --keyring "$(SOPS_KMS_KEYRING)" --location "$(SOPS_KMS_LOCATION)" --member "$$MEMBER" --role "roles/cloudkms.cryptoKeyEncrypterDecrypter" 2>/dev/null && \
+	echo "KMS key ready and IAM binding applied for $$MEMBER." || \
+	echo "KMS key ready. IAM self-grant skipped (project-level role already covers encrypt/decrypt for $$MEMBER).")
 
 gcp-init: gcp-auth gcp-enable-services
 	@echo "GCP auth and project setup ready."
@@ -202,17 +210,20 @@ gcp-artifact-registry-repo: gcp-init
 gke-auth: gcp-init
 	@PLUGIN_PATH="$$(command -v gke-gcloud-auth-plugin || true)"; \
 	if [ -n "$$PLUGIN_PATH" ]; then \
-		$(GCLOUD) container clusters get-credentials "$(GKE_CLUSTER_NAME)" --region "$(GKE_CLUSTER_REGION)" --project "$(PROJECT_ID)"; \
+		$(GCLOUD) container clusters get-credentials "$(GKE_CLUSTER_NAME)" --zone "$(GKE_CLUSTER_ZONE)" --project "$(PROJECT_ID)"; \
 	else \
 		echo "gke-gcloud-auth-plugin not found; configuring kubectl with short-lived access token."; \
-		ENDPOINT="$$( $(GCLOUD) container clusters describe "$(GKE_CLUSTER_NAME)" --region "$(GKE_CLUSTER_REGION)" --project "$(PROJECT_ID)" --format='value(endpoint)' )"; \
-		CA_CERT="$$( $(GCLOUD) container clusters describe "$(GKE_CLUSTER_NAME)" --region "$(GKE_CLUSTER_REGION)" --project "$(PROJECT_ID)" --format='value(masterAuth.clusterCaCertificate)' )"; \
+		ENDPOINT="$$( $(GCLOUD) container clusters describe "$(GKE_CLUSTER_NAME)" --zone "$(GKE_CLUSTER_ZONE)" --project "$(PROJECT_ID)" --format='value(endpoint)' )"; \
+		CA_CERT="$$( $(GCLOUD) container clusters describe "$(GKE_CLUSTER_NAME)" --zone "$(GKE_CLUSTER_ZONE)" --project "$(PROJECT_ID)" --format='value(masterAuth.clusterCaCertificate)' )"; \
 		test -n "$$ENDPOINT" || (echo "Failed to resolve cluster endpoint."; exit 1); \
 		test -n "$$CA_CERT" || (echo "Failed to resolve cluster CA certificate."; exit 1); \
-		CTX="gke_$(PROJECT_ID)_$(GKE_CLUSTER_REGION)_$(GKE_CLUSTER_NAME)"; \
+		CTX="gke_$(PROJECT_ID)_$(GKE_CLUSTER_ZONE)_$(GKE_CLUSTER_NAME)"; \
 		USER_NAME="token-user-$(GKE_CLUSTER_NAME)"; \
 		TOKEN="$$( $(GCLOUD) auth print-access-token )"; \
-		$(KUBECTL) config set-cluster "$$CTX" --server="https://$$ENDPOINT" --certificate-authority-data="$$CA_CERT" >/dev/null; \
+		CA_TMPFILE="$$(mktemp)"; \
+		printf '%s' "$$CA_CERT" | base64 --decode > "$$CA_TMPFILE"; \
+		$(KUBECTL) config set-cluster "$$CTX" --server="https://$$ENDPOINT" --certificate-authority="$$CA_TMPFILE" --embed-certs=true >/dev/null; \
+		rm -f "$$CA_TMPFILE"; \
 		$(KUBECTL) config set-credentials "$$USER_NAME" --token="$$TOKEN" >/dev/null; \
 		$(KUBECTL) config set-context "$$CTX" --cluster="$$CTX" --user="$$USER_NAME" >/dev/null; \
 		$(KUBECTL) config use-context "$$CTX" >/dev/null; \
@@ -244,6 +255,40 @@ gke-dummy-logs: gke-auth
 		echo "Logs are not available yet (pod likely still creating). Showing pod status/events:"; \
 		$(KUBECTL) -n "$(GKE_NAMESPACE)" get pods -l app=gke-dummy-workflow -o wide; \
 		POD="$$( $(KUBECTL) -n "$(GKE_NAMESPACE)" get pods -l app=gke-dummy-workflow -o jsonpath='{.items[0].metadata.name}' 2>/dev/null )"; \
+		if [ -n "$$POD" ]; then \
+			echo ""; \
+			$(KUBECTL) -n "$(GKE_NAMESPACE)" describe pod "$$POD" | sed -n '/Events:/,$$p'; \
+		fi; \
+		true \
+	)
+
+# ------------------------------------------------------------------------------------ #
+#                                GKE Research Agent                                    #
+# ------------------------------------------------------------------------------------ #
+
+gke-research-build:
+	docker build --platform "$(GKE_RESEARCH_DOCKER_PLATFORM)" -f "$(GKE_RESEARCH_DOCKERFILE)" -t "$(GKE_RESEARCH_IMAGE)" .
+
+gke-research-push: gcp-docker-auth gcp-artifact-registry-repo
+	@REGISTRY_HOST="$$(echo "$(GKE_RESEARCH_IMAGE)" | cut -d/ -f1)"; \
+	$(GCLOUD) auth print-access-token | docker login -u oauth2accesstoken --password-stdin "https://$$REGISTRY_HOST"
+	@CLOUDSDK_CONFIG=$(GCLOUD_CONFIG_ABS) docker push "$(GKE_RESEARCH_IMAGE)"
+
+gke-research-run-once: gke-namespace
+	@sed -e 's|__IMAGE__|$(GKE_RESEARCH_IMAGE)|g' -e 's|__NAMESPACE__|$(GKE_NAMESPACE)|g' "$(GKE_RESEARCH_MANIFEST_DIR)/job.yaml" | $(KUBECTL) apply -f -
+
+gke-research-schedule: gke-namespace
+	@sed -e 's|__IMAGE__|$(GKE_RESEARCH_IMAGE)|g' -e 's|__NAMESPACE__|$(GKE_NAMESPACE)|g' "$(GKE_RESEARCH_MANIFEST_DIR)/cronjob.yaml" | $(KUBECTL) apply -f -
+
+gke-research-delete: gke-auth
+	@$(KUBECTL) -n "$(GKE_NAMESPACE)" delete cronjob gke-research-agent --ignore-not-found
+	@$(KUBECTL) -n "$(GKE_NAMESPACE)" delete job gke-research-agent-once --ignore-not-found
+
+gke-research-logs: gke-auth
+	@$(KUBECTL) -n "$(GKE_NAMESPACE)" logs -l app=gke-research-agent --all-containers=true --tail=200 --prefix=true || ( \
+		echo "Logs are not available yet (pod likely still creating). Showing pod status/events:"; \
+		$(KUBECTL) -n "$(GKE_NAMESPACE)" get pods -l app=gke-research-agent -o wide; \
+		POD="$$( $(KUBECTL) -n "$(GKE_NAMESPACE)" get pods -l app=gke-research-agent -o jsonpath='{.items[0].metadata.name}' 2>/dev/null )"; \
 		if [ -n "$$POD" ]; then \
 			echo ""; \
 			$(KUBECTL) -n "$(GKE_NAMESPACE)" describe pod "$$POD" | sed -n '/Events:/,$$p'; \
