@@ -28,9 +28,9 @@ load_dotenv()
 
 
 class Configuration(BaseModel):
-    query_generator_model: str = Field(default="gemini-2.0-flash")
-    reflection_model: str = Field(default="gemini-2.0-flash")
-    answer_model: str = Field(default="gemini-2.0-flash")
+    query_generator_model: str = Field(default="gemini-2.5-flash")
+    reflection_model: str = Field(default="gemini-2.5-flash")
+    answer_model: str = Field(default="gemini-2.5-flash")
     number_of_initial_queries: int = Field(default=1)
     max_research_loops: int = Field(default=1)
 
