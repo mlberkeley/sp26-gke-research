@@ -266,14 +266,23 @@ Research gathered:
 
 Determine: (1) is this sufficient? (2) what's missing? (3) what follow-up queries would help?"""
 
-ANSWER_PROMPT = """Synthesise the following research into a comprehensive, well-structured answer.
+ANSWER_PROMPT = """Synthesize the following research into a comprehensive, well-structured answer.
 Current date: {current_date}
 Topic: {research_topic}
 
-Research:
+Planned section order:
+{section_order}
+
+Section-structured research payload:
 {summaries}
 
-Write a clear, thorough answer with inline citations (e.g. [1], [2]) where relevant."""
+Formatting contract:
+- Use exactly these top-level headings in exactly this order: one heading per planned section.
+- Heading format must be: ## [section_id] Section Title
+- Do not add extra top-level headings.
+- For each section, write only from that section's evidence snippets.
+- If a section has weak or missing evidence, include a `Gaps:` subsection in that section.
+- Use inline citations (e.g. [1], [2]) where relevant."""
 
 
 # ── Citation helpers ─────────────────────────────────────────────────────────
@@ -627,6 +636,7 @@ def finalize_answer(state: OverallState, config: RunnableConfig) -> OverallState
         ANSWER_PROMPT.format(
             current_date=_current_date(),
             research_topic=_get_research_topic(state["messages"]),
+            section_order=", ".join(state.get("section_order", [])),
             summaries=section_payload,
         )
     )
