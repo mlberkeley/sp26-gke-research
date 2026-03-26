@@ -282,7 +282,13 @@ Formatting contract:
 - Do not add extra top-level headings.
 - For each section, write only from that section's evidence snippets.
 - If a section has weak or missing evidence, include a `Gaps:` subsection in that section.
-- Use inline citations (e.g. [1], [2]) where relevant."""
+- Use inline citations (e.g. [1], [2]) where relevant.
+
+Before finalizing, perform an internal checklist:
+1) All planned headings are present.
+2) Headings are in the exact planned order.
+3) No extra top-level headings were added.
+Do not print the checklist."""
 
 
 # ── Citation helpers ─────────────────────────────────────────────────────────
