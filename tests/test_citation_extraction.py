@@ -180,3 +180,101 @@ def test_finalize_answer_filters_sources_to_markers_used(monkeypatch) -> None:
     assert any(
         e["marker_id"] == "12" and e["url"] == "https://s12b.com" for e in entries
     )
+
+
+def test_plan_research_sets_plan_and_section_order(monkeypatch) -> None:
+    class DummyLLM:
+        def with_structured_output(self, _schema: object) -> "DummyLLM":
+            return self
+
+        def invoke(self, _prompt: str) -> ra.ResearchPlan:
+            return ra.ResearchPlan(
+                topic_rewrite="Clarified topic",
+                overall_success_criteria="Enough evidence per section",
+                sections=[
+                    ra.PlanSection(
+                        id="scope_and_definitions",
+                        title="Scope and Definitions",
+                        goal="Define terms and scope",
+                        key_questions=["What is in scope?"],
+                        query_hints=["definition"],
+                        required=True,
+                    ),
+                    ra.PlanSection(
+                        id="findings",
+                        title="Findings",
+                        goal="Summarize technical findings",
+                        key_questions=["What are the main findings?"],
+                        query_hints=["benchmarks"],
+                        required=True,
+                    ),
+                ],
+            )
+
+    monkeypatch.setattr(ra, "_make_llm", lambda _model: DummyLLM())
+
+    state: ra.OverallState = {
+        "messages": [HumanMessage(content="Topic")],
+        "plan": None,
+        "section_order": [],
+        "section_results": {},
+        "section_queries": {},
+        "section_marker_sources": {},
+        "search_query": [],
+        "web_research_result": [],
+        "marker_sources": {},
+        "sources_gathered": [],
+        "initial_search_query_count": 1,
+        "max_research_loops": 1,
+        "research_loop_count": 0,
+        "reasoning_model": "gemini-2.5-flash",
+    }
+
+    result = ra.plan_research(state, config={})
+    plan = result["plan"]
+    assert plan is not None
+    assert [s.id for s in plan.sections] == ["scope_and_definitions", "findings"]
+    assert result["section_order"] == ["scope_and_definitions", "findings"]
+
+
+def test_continue_to_web_research_preserves_section_ids() -> None:
+    sends = ra.continue_to_web_research(
+        {
+            "query_list": [
+                {"search_query": "q1", "section_id": "scope_and_definitions"},
+                {"search_query": "q2", "section_id": "findings"},
+            ]
+        }
+    )
+    assert len(sends) == 2
+    assert sends[0].arg["section_id"] == "scope_and_definitions"
+    assert sends[1].arg["section_id"] == "findings"
+
+
+def test_web_research_returns_section_scoped_outputs(monkeypatch) -> None:
+    class DummyModels:
+        def generate_content(self, **_kwargs: object) -> object:
+            return object()
+
+    class DummyClient:
+        def __init__(self) -> None:
+            self.models = DummyModels()
+
+    monkeypatch.setattr(ra, "_get_genai_client", lambda: DummyClient())
+    monkeypatch.setattr(
+        ra,
+        "_extract_sources",
+        lambda *_args, **_kwargs: (
+            {21: [{"url": "https://x.com", "title": "X"}]},
+            "text [21]",
+        ),
+    )
+
+    result = ra.web_research(
+        {"search_query": "query", "id": "3", "section_id": "findings"},
+        config={},
+    )
+
+    assert result["section_queries"] == {"findings": ["query"]}
+    assert result["section_results"] == {"findings": ["text [21]"]}
+    assert "findings" in result["section_marker_sources"]
