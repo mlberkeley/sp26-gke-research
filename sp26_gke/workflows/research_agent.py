@@ -32,9 +32,9 @@ class Configuration(BaseModel):
     query_generator_model: str = Field(default="gemini-2.5-flash")
     reflection_model: str = Field(default="gemini-2.5-flash")
     answer_model: str = Field(default="gemini-2.5-flash")
-    number_of_initial_queries: int = Field(default=3)
+    number_of_initial_queries: int = Field(default=1)
     max_research_loops: int = Field(default=1)
-    max_citations_per_search: int = Field(default=10)
+    max_citations_per_search: int = Field(default=5)
 
     @classmethod
     def from_runnable_config(
@@ -210,14 +210,13 @@ PLANNER_PROMPT = """Create a topic-adaptive research plan for this technical res
 Current date: {current_date}
 Topic: {research_topic}
 
-Build an ordered plan with 5-10 sections and these rules:
+Build an ordered plan with 4-8 sections and these rules:
 - Preserve intent for required rigor sections:
   - Executive_summary
   - Scope_and_definitions
   - Findings (with topic-adaptive sub-areas)
   - Evidence_and_credibility_notes
   - Open_questions_and_gaps
-  - Sources
 - Add domain-specific sections only when they are warranted by the topic.
 - For each section include: id (snake_case), title, goal, 3-6 key_questions, 2-4 query_hints, and required.
 
@@ -266,14 +265,29 @@ Research gathered:
 
 Determine: (1) is this sufficient? (2) what's missing? (3) what follow-up queries would help?"""
 
-ANSWER_PROMPT = """Synthesise the following research into a comprehensive, well-structured answer.
+ANSWER_PROMPT = """Synthesize the following research into a comprehensive, well-structured answer.
 Current date: {current_date}
 Topic: {research_topic}
 
-Research:
+Planned section order:
+{section_order}
+
+Section-structured research payload:
 {summaries}
 
-Write a clear, thorough answer with inline citations (e.g. [1], [2]) where relevant."""
+Formatting contract:
+- Use exactly these top-level headings in exactly this order: one heading per planned section.
+- Heading format must be: ## [section_id] Section Title
+- Do not add extra top-level headings.
+- For each section, write only from that section's evidence snippets.
+- If a section has weak or missing evidence, include a `Gaps:` subsection in that section.
+- Use inline citations (e.g. [1], [2]) where relevant.
+
+Before finalizing, perform an internal checklist:
+1) All planned headings are present.
+2) Headings are in the exact planned order.
+3) No extra top-level headings were added.
+Do not print the checklist."""
 
 
 # ── Citation helpers ─────────────────────────────────────────────────────────
@@ -311,7 +325,7 @@ def _extract_sources(
     response: Any,
     *,
     citation_base: int = 0,
-    max_citations_per_search: int = 50,
+    max_citations_per_search: int = 5,
 ) -> tuple[dict[int, list[SourceRef]], str]:
     """
     Return (marker_sources_map, text_with_citation_markers) from Gemini grounded output.
@@ -415,6 +429,45 @@ def _plan_to_brief(plan: ResearchPlan) -> str:
         lines.append(f"{idx}. [{section.id}] {section.title} ({req})")
         lines.append(f"   goal: {section.goal}")
     return "\n".join(lines)
+
+
+def _build_section_synthesis_payload(
+    *,
+    plan: ResearchPlan | None,
+    section_order: list[str],
+    section_results: dict[str, list[str]],
+    fallback_summaries: list[str],
+    max_snippets_per_section: int = 3,
+) -> str:
+    if not section_order:
+        return "\n\n---\n\n".join(fallback_summaries)
+
+    section_map: dict[str, PlanSection] = {}
+    if plan:
+        section_map = {section.id: section for section in plan.sections}
+
+    parts: list[str] = []
+    for idx, section_id in enumerate(section_order, 1):
+        section = section_map.get(section_id)
+        title = section.title if section else section_id.replace("_", " ").title()
+        goal = section.goal if section else "Summarize findings for this section."
+        snippets = section_results.get(section_id, [])[:max_snippets_per_section]
+        snippets_text = (
+            "\n".join(f"- {snippet}" for snippet in snippets) or "- (no evidence)"
+        )
+        parts.append(
+            "\n".join(
+                [
+                    f"SECTION {idx}",
+                    f"id: {section_id}",
+                    f"title: {title}",
+                    f"goal: {goal}",
+                    "evidence_snippets:",
+                    snippets_text,
+                ]
+            )
+        )
+    return "\n\n---\n\n".join(parts)
 
 
 def plan_research(state: OverallState, config: RunnableConfig) -> OverallState:
@@ -576,11 +629,20 @@ def finalize_answer(state: OverallState, config: RunnableConfig) -> OverallState
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
     )
+    plan_obj = state.get("plan")
+    plan = ResearchPlan.model_validate(plan_obj) if plan_obj else None
+    section_payload = _build_section_synthesis_payload(
+        plan=plan,
+        section_order=state.get("section_order", []),
+        section_results=state.get("section_results", {}),
+        fallback_summaries=state["web_research_result"],
+    )
     result = llm.invoke(
         ANSWER_PROMPT.format(
             current_date=_current_date(),
             research_topic=_get_research_topic(state["messages"]),
-            summaries="\n\n---\n\n".join(state["web_research_result"]),
+            section_order=", ".join(state.get("section_order", [])),
+            summaries=section_payload,
         )
     )
 
