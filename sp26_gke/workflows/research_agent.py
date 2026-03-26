@@ -277,7 +277,24 @@ def _extract_sources(
 
 # ── Nodes ────────────────────────────────────────────────────────────────────
 
-_genai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+_genai_client: genai.Client | None = None
+
+
+def _get_genai_client() -> genai.Client:
+    """Create the Gemini client lazily to avoid import-time API key errors."""
+    global _genai_client
+    if _genai_client is not None:
+        return _genai_client
+
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "Missing GEMINI_API_KEY. Set it in your environment (or .env) to run web "
+            "research."
+        )
+
+    _genai_client = genai.Client(api_key=api_key)
+    return _genai_client
 
 
 def _make_llm(model: str) -> ChatGoogleGenerativeAI:
@@ -321,7 +338,7 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
         search_id = 0
 
     citation_base = search_id * cfg.max_citations_per_search
-    response = _genai_client.models.generate_content(
+    response = _get_genai_client().models.generate_content(
         model=cfg.query_generator_model,
         contents=WEB_SEARCHER_PROMPT.format(
             current_date=_current_date(),
