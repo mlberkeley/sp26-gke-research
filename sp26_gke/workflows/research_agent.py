@@ -34,7 +34,7 @@ class Configuration(BaseModel):
     answer_model: str = Field(default="gemini-2.5-flash")
     number_of_initial_queries: int = Field(default=1)
     max_research_loops: int = Field(default=1)
-    max_citations_per_search: int = Field(default=10)
+    max_citations_per_search: int = Field(default=5)
 
     @classmethod
     def from_runnable_config(
@@ -107,18 +107,6 @@ def merge_section_marker_sources(
     return out
 
 
-def merge_section_evidence_items(
-    left: dict[str, list[EvidenceItem]],
-    right: dict[str, list[EvidenceItem]],
-) -> dict[str, list[EvidenceItem]]:
-    """Reducer for section-scoped structured evidence objects."""
-    out: dict[str, list[EvidenceItem]] = {k: list(v) for k, v in left.items()}
-    for section_id, items in right.items():
-        out.setdefault(section_id, [])
-        out[section_id].extend(items)
-    return out
-
-
 class OverallState(TypedDict):
     messages: Annotated[list, add_messages]
     plan: ResearchPlan | None
@@ -128,10 +116,6 @@ class OverallState(TypedDict):
     section_marker_sources: Annotated[
         dict[str, dict[int, list[dict[str, str]]]],
         merge_section_marker_sources,
-    ]
-    section_evidence_items: Annotated[
-        dict[str, list[EvidenceItem]],
-        merge_section_evidence_items,
     ]
     search_query: Annotated[list, operator.add]
     web_research_result: Annotated[list, operator.add]
@@ -206,26 +190,6 @@ class ResearchPlan(BaseModel):
     )
 
 
-SourceRef = dict[str, str]
-
-
-class EvidenceItem(BaseModel):
-    evidence_bullet: str = Field(
-        description="Atomic evidence statement grounded in one source."
-    )
-    source: SourceRef = Field(
-        description="Source metadata with at least URL and optional title."
-    )
-    reasoning: str = Field(
-        description="Why this evidence matters for the current section."
-    )
-    section_id: str = Field(description="Section id this evidence supports.")
-    search_query: str = Field(description="Query that produced this evidence.")
-    marker_id: int | None = Field(
-        default=None, description="Optional citation marker id for traceability."
-    )
-
-
 # ── Prompts ──────────────────────────────────────────────────────────────────
 
 
@@ -246,14 +210,13 @@ PLANNER_PROMPT = """Create a topic-adaptive research plan for this technical res
 Current date: {current_date}
 Topic: {research_topic}
 
-Build an ordered plan with 5-10 sections and these rules:
+Build an ordered plan with 4-8 sections and these rules:
 - Preserve intent for required rigor sections:
   - Executive_summary
   - Scope_and_definitions
   - Findings (with topic-adaptive sub-areas)
   - Evidence_and_credibility_notes
   - Open_questions_and_gaps
-  - Sources
 - Add domain-specific sections only when they are warranted by the topic.
 - For each section include: id (snake_case), title, goal, 3-6 key_questions, 2-4 query_hints, and required.
 
@@ -329,6 +292,8 @@ Do not print the checklist."""
 
 # ── Citation helpers ─────────────────────────────────────────────────────────
 
+SourceRef = dict[str, str]
+
 
 class _CitationEntry(TypedDict):
     end: int
@@ -360,7 +325,7 @@ def _extract_sources(
     response: Any,
     *,
     citation_base: int = 0,
-    max_citations_per_search: int = 50,
+    max_citations_per_search: int = 5,
 ) -> tuple[dict[int, list[SourceRef]], str]:
     """
     Return (marker_sources_map, text_with_citation_markers) from Gemini grounded output.
@@ -751,7 +716,6 @@ def run() -> int:
         "section_results": {},
         "section_queries": {},
         "section_marker_sources": {},
-        "section_evidence_items": {},
         "search_query": [],
         "web_research_result": [],
         "marker_sources": {},

@@ -156,7 +156,6 @@ def test_finalize_answer_filters_sources_to_markers_used(monkeypatch) -> None:
         "section_results": {},
         "section_queries": {},
         "section_marker_sources": {},
-        "section_evidence_items": {},
         "search_query": [],
         "web_research_result": ["evidence with [11] and [12] markers"],
         "marker_sources": {
@@ -221,7 +220,6 @@ def test_plan_research_sets_plan_and_section_order(monkeypatch) -> None:
         "section_results": {},
         "section_queries": {},
         "section_marker_sources": {},
-        "section_evidence_items": {},
         "search_query": [],
         "web_research_result": [],
         "marker_sources": {},
