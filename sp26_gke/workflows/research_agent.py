@@ -79,8 +79,44 @@ def merge_marker_sources(
     return out
 
 
+def merge_section_lists(
+    left: dict[str, list[str]], right: dict[str, list[str]]
+) -> dict[str, list[str]]:
+    """Reducer for merging section_id -> string-list maps across branches."""
+    out: dict[str, list[str]] = {k: list(v) for k, v in left.items()}
+    for section_id, items in right.items():
+        out.setdefault(section_id, [])
+        out[section_id].extend(items)
+    return out
+
+
+def merge_section_marker_sources(
+    left: dict[str, dict[int, list[dict[str, str]]]],
+    right: dict[str, dict[int, list[dict[str, str]]]],
+) -> dict[str, dict[int, list[dict[str, str]]]]:
+    """Reducer for section-scoped marker sources."""
+    out: dict[str, dict[int, list[dict[str, str]]]] = {
+        section_id: {marker: list(srcs) for marker, srcs in marker_map.items()}
+        for section_id, marker_map in left.items()
+    }
+    for section_id, marker_map in right.items():
+        section_out = out.setdefault(section_id, {})
+        for marker_id, sources in marker_map.items():
+            section_out.setdefault(marker_id, [])
+            section_out[marker_id].extend(sources)
+    return out
+
+
 class OverallState(TypedDict):
     messages: Annotated[list, add_messages]
+    plan: ResearchPlan | None
+    section_order: list[str]
+    section_results: Annotated[dict[str, list[str]], merge_section_lists]
+    section_queries: Annotated[dict[str, list[str]], merge_section_lists]
+    section_marker_sources: Annotated[
+        dict[str, dict[int, list[dict[str, str]]]],
+        merge_section_marker_sources,
+    ]
     search_query: Annotated[list, operator.add]
     web_research_result: Annotated[list, operator.add]
     marker_sources: Annotated[dict[int, list[dict[str, str]]], merge_marker_sources]
@@ -106,6 +142,7 @@ class ReflectionState(TypedDict):
 class WebSearchState(TypedDict):
     search_query: str
     id: str
+    section_id: str
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
@@ -375,7 +412,11 @@ def plan_research(state: OverallState, config: RunnableConfig) -> OverallState:
     )
     plan = ResearchPlan.model_validate(result)
     plan_brief = _plan_to_brief(plan)
-    return {"messages": [AIMessage(content=plan_brief)]}  # type: ignore[typeddict-item]
+    return {  # type: ignore[typeddict-item]
+        "messages": [AIMessage(content=plan_brief)],
+        "plan": plan,
+        "section_order": [section.id for section in plan.sections],
+    }
 
 
 def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerationState:
@@ -550,6 +591,11 @@ def run() -> int:
 
     inputs: dict[str, Any] = {
         "messages": [HumanMessage(content=question)],
+        "plan": None,
+        "section_order": [],
+        "section_results": {},
+        "section_queries": {},
+        "section_marker_sources": {},
         "search_query": [],
         "web_research_result": [],
         "marker_sources": {},

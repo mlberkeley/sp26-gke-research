@@ -151,6 +151,11 @@ def test_finalize_answer_filters_sources_to_markers_used(monkeypatch) -> None:
 
     state: ra.OverallState = {
         "messages": [HumanMessage(content="Topic")],
+        "plan": None,
+        "section_order": [],
+        "section_results": {},
+        "section_queries": {},
+        "section_marker_sources": {},
         "search_query": [],
         "web_research_result": ["evidence with [11] and [12] markers"],
         "marker_sources": {
