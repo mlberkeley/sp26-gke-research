@@ -34,7 +34,7 @@ class Configuration(BaseModel):
     answer_model: str = Field(default="gemini-2.5-flash")
     number_of_initial_queries: int = Field(default=3)
     max_research_loops: int = Field(default=1)
-    max_citations_per_search: int = Field(default=20)
+    max_citations_per_search: int = Field(default=10)
 
     @classmethod
     def from_runnable_config(
@@ -79,8 +79,44 @@ def merge_marker_sources(
     return out
 
 
+def merge_section_lists(
+    left: dict[str, list[str]], right: dict[str, list[str]]
+) -> dict[str, list[str]]:
+    """Reducer for merging section_id -> string-list maps across branches."""
+    out: dict[str, list[str]] = {k: list(v) for k, v in left.items()}
+    for section_id, items in right.items():
+        out.setdefault(section_id, [])
+        out[section_id].extend(items)
+    return out
+
+
+def merge_section_marker_sources(
+    left: dict[str, dict[int, list[dict[str, str]]]],
+    right: dict[str, dict[int, list[dict[str, str]]]],
+) -> dict[str, dict[int, list[dict[str, str]]]]:
+    """Reducer for section-scoped marker sources."""
+    out: dict[str, dict[int, list[dict[str, str]]]] = {
+        section_id: {marker: list(srcs) for marker, srcs in marker_map.items()}
+        for section_id, marker_map in left.items()
+    }
+    for section_id, marker_map in right.items():
+        section_out = out.setdefault(section_id, {})
+        for marker_id, sources in marker_map.items():
+            section_out.setdefault(marker_id, [])
+            section_out[marker_id].extend(sources)
+    return out
+
+
 class OverallState(TypedDict):
     messages: Annotated[list, add_messages]
+    plan: ResearchPlan | None
+    section_order: list[str]
+    section_results: Annotated[dict[str, list[str]], merge_section_lists]
+    section_queries: Annotated[dict[str, list[str]], merge_section_lists]
+    section_marker_sources: Annotated[
+        dict[str, dict[int, list[dict[str, str]]]],
+        merge_section_marker_sources,
+    ]
     search_query: Annotated[list, operator.add]
     web_research_result: Annotated[list, operator.add]
     marker_sources: Annotated[dict[int, list[dict[str, str]]], merge_marker_sources]
@@ -92,7 +128,7 @@ class OverallState(TypedDict):
 
 
 class QueryGenerationState(TypedDict):
-    query_list: list
+    query_list: list[dict[str, str]]
 
 
 class ReflectionState(TypedDict):
@@ -106,6 +142,7 @@ class ReflectionState(TypedDict):
 class WebSearchState(TypedDict):
     search_query: str
     id: str
+    section_id: str
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
@@ -126,6 +163,33 @@ class Reflection(BaseModel):
     )
 
 
+class PlanSection(BaseModel):
+    id: str = Field(description="Stable section identifier in snake_case.")
+    title: str = Field(description="Human-readable section heading.")
+    goal: str = Field(description="What this section should establish.")
+    key_questions: list[str] = Field(
+        default_factory=list, description="Key research questions for this section."
+    )
+    query_hints: list[str] = Field(
+        default_factory=list, description="Helpful seed terms for search query writing."
+    )
+    required: bool = Field(
+        default=False, description="Whether this section is required in the report."
+    )
+
+
+class ResearchPlan(BaseModel):
+    topic_rewrite: str = Field(
+        description="Optional clarified rewrite of the original research topic."
+    )
+    overall_success_criteria: str = Field(
+        description="How to judge whether this research run is complete."
+    )
+    sections: list[PlanSection] = Field(
+        default_factory=list, description="Ordered plan sections for this topic."
+    )
+
+
 # ── Prompts ──────────────────────────────────────────────────────────────────
 
 
@@ -142,6 +206,24 @@ def _get_research_topic(messages: list) -> str:
     return str(messages[0]) if messages else ""
 
 
+PLANNER_PROMPT = """Create a topic-adaptive research plan for this technical research task.
+Current date: {current_date}
+Topic: {research_topic}
+
+Build an ordered plan with 5-10 sections and these rules:
+- Preserve intent for required rigor sections:
+  - Executive_summary
+  - Scope_and_definitions
+  - Findings (with topic-adaptive sub-areas)
+  - Evidence_and_credibility_notes
+  - Open_questions_and_gaps
+  - Sources
+- Add domain-specific sections only when they are warranted by the topic.
+- For each section include: id (snake_case), title, goal, 3-6 key_questions, 2-4 query_hints, and required.
+
+Respond as JSON matching the provided schema exactly."""
+
+
 QUERY_WRITER_PROMPT = """Generate {number_queries} diverse, targeted web search queries to research this topic.
 Current date: {current_date}
 Topic: {research_topic}
@@ -150,6 +232,22 @@ Rules:
 - Prefer a single query unless the topic has multiple distinct aspects
 - Queries must be specific and likely to return current, authoritative results
 - No duplicate or near-duplicate queries
+
+Respond as JSON with keys "rationale" (string) and "query" (list of strings)."""
+
+SECTION_QUERY_WRITER_PROMPT = """Generate {number_queries} diverse, targeted web search queries for one section of a technical research report.
+Current date: {current_date}
+Topic: {research_topic}
+Section id: {section_id}
+Section title: {section_title}
+Section goal: {section_goal}
+Section key questions:
+{section_key_questions}
+
+Rules:
+- Focus only on this section's scope.
+- Queries must be specific and likely to return current, authoritative results.
+- No duplicate or near-duplicate queries.
 
 Respond as JSON with keys "rationale" (string) and "query" (list of strings)."""
 
@@ -306,25 +404,91 @@ def _make_llm(model: str) -> ChatGoogleGenerativeAI:
     )
 
 
+def _plan_to_brief(plan: ResearchPlan) -> str:
+    lines = [
+        "Research plan:",
+        f"- topic_rewrite: {plan.topic_rewrite}",
+        f"- success_criteria: {plan.overall_success_criteria}",
+    ]
+    for idx, section in enumerate(plan.sections, 1):
+        req = "required" if section.required else "optional"
+        lines.append(f"{idx}. [{section.id}] {section.title} ({req})")
+        lines.append(f"   goal: {section.goal}")
+    return "\n".join(lines)
+
+
+def plan_research(state: OverallState, config: RunnableConfig) -> OverallState:
+    cfg = Configuration.from_runnable_config(config)
+    llm = _make_llm(cfg.query_generator_model)
+    result = llm.with_structured_output(ResearchPlan).invoke(
+        PLANNER_PROMPT.format(
+            current_date=_current_date(),
+            research_topic=_get_research_topic(state["messages"]),
+        )
+    )
+    plan = ResearchPlan.model_validate(result)
+    plan_brief = _plan_to_brief(plan)
+    return {  # type: ignore[typeddict-item]
+        "messages": [AIMessage(content=plan_brief)],
+        "plan": plan,
+        "section_order": [section.id for section in plan.sections],
+    }
+
+
 def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerationState:
     cfg = Configuration.from_runnable_config(config)
     count = state.get("initial_search_query_count") or cfg.number_of_initial_queries
 
     llm = _make_llm(cfg.query_generator_model)
-    result = llm.with_structured_output(SearchQueryList).invoke(
-        QUERY_WRITER_PROMPT.format(
-            current_date=_current_date(),
-            research_topic=_get_research_topic(state["messages"]),
-            number_queries=count,
+    plan_obj = state.get("plan")
+    plan = ResearchPlan.model_validate(plan_obj) if plan_obj else None
+
+    if not plan or not plan.sections:
+        result = llm.with_structured_output(SearchQueryList).invoke(
+            QUERY_WRITER_PROMPT.format(
+                current_date=_current_date(),
+                research_topic=_get_research_topic(state["messages"]),
+                number_queries=count,
+            )
         )
-    )
-    return {"query_list": result.query}  # type: ignore[union-attr]
+        return {
+            "query_list": [
+                {"search_query": q, "section_id": "unplanned"}
+                for q in result.query  # type: ignore[union-attr]
+            ]
+        }
+
+    query_list: list[dict[str, str]] = []
+    topic = _get_research_topic(state["messages"])
+    for section in plan.sections:
+        key_questions = "\n".join(f"- {q}" for q in section.key_questions) or "- n/a"
+        result = llm.with_structured_output(SearchQueryList).invoke(
+            SECTION_QUERY_WRITER_PROMPT.format(
+                current_date=_current_date(),
+                research_topic=topic,
+                section_id=section.id,
+                section_title=section.title,
+                section_goal=section.goal,
+                section_key_questions=key_questions,
+                number_queries=count,
+            )
+        )
+        for query in result.query:  # type: ignore[union-attr]
+            query_list.append({"search_query": query, "section_id": section.id})
+    return {"query_list": query_list}
 
 
 def continue_to_web_research(state: QueryGenerationState) -> list[Send]:
     return [
-        Send("web_research", {"search_query": q, "id": i})
-        for i, q in enumerate(state["query_list"])
+        Send(
+            "web_research",
+            {
+                "search_query": item["search_query"],
+                "id": i,
+                "section_id": item["section_id"],
+            },
+        )
+        for i, item in enumerate(state["query_list"])
     ]
 
 
@@ -356,6 +520,9 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
         "marker_sources": marker_sources,
         "search_query": [state["search_query"]],
         "web_research_result": [text_with_citations],
+        "section_results": {state["section_id"]: [text_with_citations]},
+        "section_queries": {state["section_id"]: [state["search_query"]]},
+        "section_marker_sources": {state["section_id"]: marker_sources},
     }
 
 
@@ -391,7 +558,11 @@ def evaluate_research(
     return [
         Send(
             "web_research",
-            {"search_query": q, "id": state["number_of_ran_queries"] + i},
+            {
+                "search_query": q,
+                "id": state["number_of_ran_queries"] + i,
+                "section_id": "follow_up",
+            },
         )
         for i, q in enumerate(state["follow_up_queries"])
     ]
@@ -447,11 +618,13 @@ def finalize_answer(state: OverallState, config: RunnableConfig) -> OverallState
 # ── Build graph ──────────────────────────────────────────────────────────────
 
 builder = StateGraph(OverallState, config_schema=Configuration)  # type: ignore[call-arg]
+builder.add_node("plan_research", plan_research)
 builder.add_node("generate_query", generate_query)
 builder.add_node("web_research", web_research)
 builder.add_node("reflection", reflection)
 builder.add_node("finalize_answer", finalize_answer)
-builder.add_edge(START, "generate_query")
+builder.add_edge(START, "plan_research")
+builder.add_edge("plan_research", "generate_query")
 builder.add_conditional_edges(
     "generate_query", continue_to_web_research, ["web_research"]
 )
@@ -476,6 +649,11 @@ def run() -> int:
 
     inputs: dict[str, Any] = {
         "messages": [HumanMessage(content=question)],
+        "plan": None,
+        "section_order": [],
+        "section_results": {},
+        "section_queries": {},
+        "section_marker_sources": {},
         "search_query": [],
         "web_research_result": [],
         "marker_sources": {},
@@ -492,8 +670,29 @@ def run() -> int:
             return s
         return s[: max_len - 1] + "…"
 
+    def _section_counts(state_values: dict[str, Any], key: str) -> dict[str, int]:
+        raw = state_values.get(key, {})
+        if not isinstance(raw, dict):
+            return {}
+        out: dict[str, int] = {}
+        for section_id, items in raw.items():
+            if isinstance(section_id, str) and isinstance(items, list):
+                out[section_id] = len(items)
+        return out
+
     def _print_progress_from_update(node: str, update: dict[str, Any]) -> None:
         match node:
+            case "plan_research":
+                section_order = update.get("section_order")
+                if isinstance(section_order, list) and section_order:
+                    print(
+                        f"→ plan_research: planned {len(section_order)} sections",
+                        flush=True,
+                    )
+                    for i, section_id in enumerate(section_order, 1):
+                        print(f"  - [{i}] {section_id}", flush=True)
+                else:
+                    print("→ plan_research", flush=True)
             case "generate_query":
                 # Not guaranteed to exist in the update chunk, but if present, print it.
                 queries = update.get("query_list")
@@ -502,18 +701,27 @@ def run() -> int:
                         f"→ generate_query: generated {len(queries)} queries",
                         flush=True,
                     )
-                    for i, q in enumerate(queries):
-                        print(f"  - [{i}] {q}", flush=True)
+                    by_section: dict[str, int] = {}
+                    for item in queries:
+                        if isinstance(item, dict):
+                            section_id = str(item.get("section_id", "unplanned"))
+                            by_section[section_id] = by_section.get(section_id, 0) + 1
+                    for section_id, count in sorted(by_section.items()):
+                        print(f"  - {section_id}: {count} queries", flush=True)
                 else:
                     print("→ generate_query", flush=True)
             case "web_research":
+                section_results = update.get("section_results")
+                if isinstance(section_results, dict) and section_results:
+                    section_id = next(iter(section_results.keys()))
+                    print(f"→ web_research: section={section_id}", flush=True)
                 q = update.get("search_query")
                 if isinstance(q, list) and q:
                     # Reducer appends, so the newest is the last.
                     newest = str(q[-1])
-                    print(f'→ web_research: searching "{newest}"', flush=True)
+                    print(f'  searching "{newest}"', flush=True)
                 elif isinstance(q, str):
-                    print(f'→ web_research: searching "{q}"', flush=True)
+                    print(f'  searching "{q}"', flush=True)
                 else:
                     print("→ web_research", flush=True)
 
@@ -567,9 +775,22 @@ def run() -> int:
                         print(f"→ {node}", flush=True)
             elif mode == "values" and isinstance(chunk, dict):
                 last_values = chunk
+                query_counts = _section_counts(chunk, "section_queries")
+                evidence_counts = _section_counts(chunk, "section_results")
+                if query_counts or evidence_counts:
+                    print("  section progress:", flush=True)
+                    section_ids = sorted(set(query_counts) | set(evidence_counts))
+                    for section_id in section_ids:
+                        q_count = query_counts.get(section_id, 0)
+                        e_count = evidence_counts.get(section_id, 0)
+                        print(
+                            f"  - {section_id}: queries={q_count} evidence={e_count}",
+                            flush=True,
+                        )
     except Exception:
         # Fallback to updates-only streaming (older LangGraph versions), and use invoke for
         # final output if we can't capture final values.
+        last_values = None
         for chunk in graph_runner.stream(inputs, stream_mode="updates"):
             if not isinstance(chunk, dict):
                 continue
