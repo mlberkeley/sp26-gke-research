@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import operator
 import os
+import re
 import sys
 from datetime import datetime
 from typing import Annotated, Any, TypedDict
@@ -31,8 +32,9 @@ class Configuration(BaseModel):
     query_generator_model: str = Field(default="gemini-2.5-flash")
     reflection_model: str = Field(default="gemini-2.5-flash")
     answer_model: str = Field(default="gemini-2.5-flash")
-    number_of_initial_queries: int = Field(default=1)
-    max_research_loops: int = Field(default=1)
+    number_of_initial_queries: int = Field(default=3)
+    max_research_loops: int = Field(default=2)
+    max_citations_per_search: int = Field(default=50)
 
     @classmethod
     def from_runnable_config(
@@ -51,10 +53,37 @@ class Configuration(BaseModel):
 # ── State ────────────────────────────────────────────────────────────────────
 
 
+def merge_marker_sources(
+    left: dict[int, list[dict[str, str]]],
+    right: dict[int, list[dict[str, str]]],
+) -> dict[int, list[dict[str, str]]]:
+    """Reducer for merging marker_id -> sources maps across parallel branches."""
+    out: dict[int, list[dict[str, str]]] = {k: list(v) for k, v in left.items()}
+    for marker_id, sources in right.items():
+        if marker_id not in out:
+            out[marker_id] = list(sources)
+            continue
+
+        combined = out[marker_id] + list(sources)
+        deduped_by_url: dict[str, dict[str, str]] = {}
+        for src in combined:
+            url = src.get("url", "")
+            if url:
+                # Keep the first occurrence of each URL for stability.
+                deduped_by_url.setdefault(url, src)
+            else:
+                # If the source has no URL, keep it but don't attempt deduplication.
+                deduped_by_url[str(len(deduped_by_url))] = src
+
+        out[marker_id] = list(deduped_by_url.values())
+    return out
+
+
 class OverallState(TypedDict):
     messages: Annotated[list, add_messages]
     search_query: Annotated[list, operator.add]
     web_research_result: Annotated[list, operator.add]
+    marker_sources: Annotated[dict[int, list[dict[str, str]]], merge_marker_sources]
     sources_gathered: Annotated[list, operator.add]
     initial_search_query_count: int
     max_research_loops: int
@@ -151,26 +180,34 @@ Write a clear, thorough answer with inline citations (e.g. [1], [2]) where relev
 
 # ── Citation helpers ─────────────────────────────────────────────────────────
 
+SourceRef = dict[str, str]
 
-def _extract_sources(response: Any) -> tuple[list, str]:
-    """Return (sources_list, text_with_citation_markers) from a Gemini grounded
-    response."""
+
+class _ExtractedCitation(TypedDict):
+    end: int
+    sources: list[SourceRef]
+
+
+def _extract_sources(
+    response: Any,
+    *,
+    citation_base: int = 0,
+    max_citations_per_search: int = 50,
+) -> tuple[dict[int, list[SourceRef]], str]:
+    """
+    Return (marker_sources_map, text_with_citation_markers) from Gemini grounded output.
+
+    The returned `marker_sources_map` is keyed by stable citation marker id,
+    ensuring marker ids can be mapped back to URL(s) later.
+    """
     text = response.text or ""
-    sources: list[dict[str, str]] = []
+    marker_sources: dict[int, list[SourceRef]] = {}
     try:
         meta = response.candidates[0].grounding_metadata
         chunks = getattr(meta, "grounding_chunks", []) or []
         supports = getattr(meta, "grounding_supports", []) or []
 
-        for chunk in chunks:
-            web = getattr(chunk, "web", None)
-            if web:
-                url = getattr(web, "uri", "")
-                title = getattr(web, "title", "")
-                if url not in {s["url"] for s in sources}:
-                    sources.append({"url": url, "title": title})
-
-        citations = []
+        citations: list[_ExtractedCitation] = []
         for support in supports:
             seg = getattr(support, "segment", None)
             if not seg:
@@ -190,21 +227,31 @@ def _extract_sources(response: Any) -> tuple[list, str]:
             if segs:
                 citations.append(
                     {
-                        "end": getattr(seg, "end_index", 0) or 0,
+                        "end": int(getattr(seg, "end_index", 0) or 0),
                         "sources": segs,
                     }
                 )
 
-        for i, cite in enumerate(
-            sorted(citations, key=lambda c: c["end"], reverse=True), 1
-        ):
-            end = int(cite["end"])  # type: ignore[arg-type]
-            text = text[:end] + f" [{i}]" + text[end:]
+        sorted_citations = sorted(citations, key=lambda c: c["end"], reverse=True)[
+            :max_citations_per_search
+        ]
+        for i, cite in enumerate(sorted_citations, 1):
+            marker_id = citation_base + i
+            end = cite["end"]
+            text = text[:end] + f" [{marker_id}]" + text[end:]
+
+            # De-dupe sources inside each marker by URL.
+            deduped: dict[str, SourceRef] = {}
+            for src in cite["sources"]:
+                url = src.get("url", "")
+                if url and url not in deduped:
+                    deduped[url] = src
+            marker_sources[marker_id] = list(deduped.values())
 
     except Exception:
         pass
 
-    return sources, text
+    return marker_sources, text
 
 
 # ── Nodes ────────────────────────────────────────────────────────────────────
@@ -245,6 +292,14 @@ def continue_to_web_research(state: QueryGenerationState) -> list[Send]:
 
 def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     cfg = Configuration.from_runnable_config(config)
+    try:
+        search_id = int(state["id"])
+    except (TypeError, ValueError):
+        # Fallback: if id is not an int-like string, still produce deterministic
+        # markers within this single process.
+        search_id = 0
+
+    citation_base = search_id * cfg.max_citations_per_search
     response = _genai_client.models.generate_content(
         model=cfg.query_generator_model,
         contents=WEB_SEARCHER_PROMPT.format(
@@ -253,9 +308,14 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
         ),
         config={"tools": [{"google_search": {}}], "temperature": 0},
     )
-    sources, text_with_citations = _extract_sources(response)
+
+    marker_sources, text_with_citations = _extract_sources(
+        response,
+        citation_base=citation_base,
+        max_citations_per_search=cfg.max_citations_per_search,
+    )
     return {  # type: ignore[typeddict-item]
-        "sources_gathered": sources,
+        "marker_sources": marker_sources,
         "search_query": [state["search_query"]],
         "web_research_result": [text_with_citations],
     }
@@ -314,13 +374,54 @@ def finalize_answer(state: OverallState, config: RunnableConfig) -> OverallState
             summaries="\n\n---\n\n".join(state["web_research_result"]),
         )
     )
-    seen: set[str] = set()
-    unique: list[dict[str, str]] = []
-    for s in state.get("sources_gathered", []):
-        if s.get("url") and s["url"] not in seen:
-            seen.add(s["url"])
-            unique.append(s)
-    return {"messages": [AIMessage(content=result.content)], "sources_gathered": unique}  # type: ignore[typeddict-item]
+
+    content = getattr(result, "content", "")
+    answer_text = content if isinstance(content, str) else ""
+    marker_id_strs = re.findall(r"\[(\d+)\]", answer_text)
+    marker_ids = sorted({int(mid) for mid in marker_id_strs if mid})
+
+    marker_sources: dict[int, list[dict[str, str]]] = state.get("marker_sources", {})
+    entries: list[dict[str, str]] = []
+    seen_entries: set[tuple[int, str]] = set()
+
+    # UI-only remap: display dense ids [1..N] while keeping underlying
+    # `marker_sources` stable under the original marker ids.
+    known_marker_ids = [mid for mid in marker_ids if mid in marker_sources]
+    dense_marker_ids = {mid: i + 1 for i, mid in enumerate(known_marker_ids)}
+
+    def _remap_match(match: re.Match[str]) -> str:
+        original = int(match.group(1))
+        display = dense_marker_ids.get(original)
+        if display is None:
+            # Leave unknown markers untouched.
+            return match.group(0)
+        return f"[{display}]"
+
+    answer_text_dense = re.sub(r"\[(\d+)\]", _remap_match, answer_text)
+
+    for original_marker_id in known_marker_ids:
+        display_id = dense_marker_ids[original_marker_id]
+        for src in marker_sources.get(original_marker_id, []):
+            url = src.get("url", "")
+            if not url:
+                continue
+            key = (display_id, url)
+            if key in seen_entries:
+                continue
+            seen_entries.add(key)
+            entries.append(
+                {
+                    "marker_id": str(display_id),
+                    "original_marker_id": str(original_marker_id),
+                    "title": src.get("title", "No title"),
+                    "url": url,
+                }
+            )
+
+    return {
+        "messages": [AIMessage(content=answer_text_dense)],
+        "sources_gathered": entries,
+    }  # type: ignore[typeddict-item]
 
 
 # ── Build graph ──────────────────────────────────────────────────────────────
@@ -358,6 +459,7 @@ def run() -> int:
             "messages": [HumanMessage(content=question)],
             "search_query": [],
             "web_research_result": [],
+            "marker_sources": {},
             "sources_gathered": [],
             "research_loop_count": 0,
         }
@@ -368,8 +470,10 @@ def run() -> int:
     sources = result.get("sources_gathered", [])
     if sources:
         print(f"\n--- Sources ({len(sources)}) ---")
-        for i, s in enumerate(sources, 1):
-            print(f"[{i}] {s.get('title', 'No title')}\n    {s.get('url', '')}")
+        for s in sources:
+            marker_label = s.get("marker_id")
+            label = marker_label if marker_label else "?"
+            print(f"[{label}] {s.get('title', 'No title')}\n    {s.get('url', '')}")
 
     return 0
 
