@@ -277,7 +277,24 @@ def _extract_sources(
 
 # ── Nodes ────────────────────────────────────────────────────────────────────
 
-_genai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+_genai_client: genai.Client | None = None
+
+
+def _get_genai_client() -> genai.Client:
+    """Create the Gemini client lazily (avoid requiring API key at import time)."""
+    global _genai_client
+    if _genai_client is not None:
+        return _genai_client
+
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "Missing GEMINI_API_KEY. Set it in your environment (or .env) to run web "
+            "research."
+        )
+
+    _genai_client = genai.Client(api_key=api_key)
+    return _genai_client
 
 
 def _make_llm(model: str) -> ChatGoogleGenerativeAI:
@@ -321,7 +338,7 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
         search_id = 0
 
     citation_base = search_id * cfg.max_citations_per_search
-    response = _genai_client.models.generate_content(
+    response = _get_genai_client().models.generate_content(
         model=cfg.query_generator_model,
         contents=WEB_SEARCHER_PROMPT.format(
             current_date=_current_date(),
@@ -457,20 +474,120 @@ def run() -> int:
     question = " ".join(sys.argv[1:])
     print(f"\nResearching: {question}\n")
 
-    result = graph.invoke(  # type: ignore[call-overload]
-        {
-            "messages": [HumanMessage(content=question)],
-            "search_query": [],
-            "web_research_result": [],
-            "marker_sources": {},
-            "sources_gathered": [],
-            "research_loop_count": 0,
-        }
-    )
+    inputs: dict[str, Any] = {
+        "messages": [HumanMessage(content=question)],
+        "search_query": [],
+        "web_research_result": [],
+        "marker_sources": {},
+        "sources_gathered": [],
+        "research_loop_count": 0,
+        "initial_search_query_count": 0,
+        "max_research_loops": 0,
+        "reasoning_model": "",
+    }
 
-    print(result["messages"][-1].content)
+    def _trim(text: str, max_len: int = 160) -> str:
+        s = " ".join(text.split())
+        if len(s) <= max_len:
+            return s
+        return s[: max_len - 1] + "…"
 
-    sources = result.get("sources_gathered", [])
+    def _print_progress_from_update(node: str, update: dict[str, Any]) -> None:
+        match node:
+            case "generate_query":
+                # Not guaranteed to exist in the update chunk, but if present, print it.
+                queries = update.get("query_list")
+                if isinstance(queries, list):
+                    print(
+                        f"→ generate_query: generated {len(queries)} queries",
+                        flush=True,
+                    )
+                    for i, q in enumerate(queries):
+                        print(f"  - [{i}] {q}", flush=True)
+                else:
+                    print("→ generate_query", flush=True)
+            case "web_research":
+                q = update.get("search_query")
+                if isinstance(q, list) and q:
+                    # Reducer appends, so the newest is the last.
+                    newest = str(q[-1])
+                    print(f'→ web_research: searching "{newest}"', flush=True)
+                elif isinstance(q, str):
+                    print(f'→ web_research: searching "{q}"', flush=True)
+                else:
+                    print("→ web_research", flush=True)
+
+                marker_sources = update.get("marker_sources")
+                if isinstance(marker_sources, dict):
+                    print(
+                        f"  extracted {len(marker_sources)} citation markers",
+                        flush=True,
+                    )
+            case "reflection":
+                is_sufficient = update.get("is_sufficient")
+                loop = update.get("research_loop_count")
+                ran = update.get("number_of_ran_queries")
+                gap = update.get("knowledge_gap")
+                gap_txt = _trim(str(gap)) if gap else ""
+                parts: list[str] = []
+                if is_sufficient is not None:
+                    parts.append(f"sufficient={str(is_sufficient).lower()}")
+                if loop is not None:
+                    parts.append(f"loop={loop}")
+                if ran is not None:
+                    parts.append(f"ran_queries={ran}")
+                header = "→ reflection" + (": " + " ".join(parts) if parts else "")
+                print(header, flush=True)
+                if gap_txt:
+                    print(f'  gap="{gap_txt}"', flush=True)
+
+                follow_ups = update.get("follow_up_queries")
+                if isinstance(follow_ups, list) and follow_ups:
+                    print(f"  follow_up_queries={len(follow_ups)}", flush=True)
+            case "finalize_answer":
+                print("→ finalize_answer", flush=True)
+            case _:
+                print(f"→ {node}", flush=True)
+
+    last_values: dict[str, Any] | None = None
+
+    # Stream both per-node updates (for progress) and full values (for final output).
+    graph_runner: Any = graph
+    try:
+        stream_iter = graph_runner.stream(
+            inputs,
+            stream_mode=["updates", "values"],
+        )
+        for mode, chunk in stream_iter:
+            if mode == "updates" and isinstance(chunk, dict):
+                for node, update in chunk.items():
+                    if isinstance(update, dict):
+                        _print_progress_from_update(str(node), update)
+                    else:
+                        print(f"→ {node}", flush=True)
+            elif mode == "values" and isinstance(chunk, dict):
+                last_values = chunk
+    except Exception:
+        # Fallback to updates-only streaming (older LangGraph versions), and use invoke for
+        # final output if we can't capture final values.
+        for chunk in graph_runner.stream(inputs, stream_mode="updates"):
+            if not isinstance(chunk, dict):
+                continue
+            for node, update in chunk.items():
+                if isinstance(update, dict):
+                    _print_progress_from_update(str(node), update)
+                else:
+                    print(f"→ {node}", flush=True)
+
+    if last_values is None:
+        # If we couldn't capture final state via streaming, do a normal run to get it.
+        last_values = graph_runner.invoke(inputs)
+
+    messages = last_values.get("messages", [])
+    if messages:
+        print(messages[-1].content)
+
+    sources = last_values.get("sources_gathered", [])
     if sources:
         print(f"\n--- Sources ({len(sources)}) ---")
         for s in sources:
