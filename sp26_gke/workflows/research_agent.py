@@ -128,7 +128,7 @@ class OverallState(TypedDict):
 
 
 class QueryGenerationState(TypedDict):
-    query_list: list
+    query_list: list[dict[str, str]]
 
 
 class ReflectionState(TypedDict):
@@ -232,6 +232,22 @@ Rules:
 - Prefer a single query unless the topic has multiple distinct aspects
 - Queries must be specific and likely to return current, authoritative results
 - No duplicate or near-duplicate queries
+
+Respond as JSON with keys "rationale" (string) and "query" (list of strings)."""
+
+SECTION_QUERY_WRITER_PROMPT = """Generate {number_queries} diverse, targeted web search queries for one section of a technical research report.
+Current date: {current_date}
+Topic: {research_topic}
+Section id: {section_id}
+Section title: {section_title}
+Section goal: {section_goal}
+Section key questions:
+{section_key_questions}
+
+Rules:
+- Focus only on this section's scope.
+- Queries must be specific and likely to return current, authoritative results.
+- No duplicate or near-duplicate queries.
 
 Respond as JSON with keys "rationale" (string) and "query" (list of strings)."""
 
@@ -424,20 +440,55 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
     count = state.get("initial_search_query_count") or cfg.number_of_initial_queries
 
     llm = _make_llm(cfg.query_generator_model)
-    result = llm.with_structured_output(SearchQueryList).invoke(
-        QUERY_WRITER_PROMPT.format(
-            current_date=_current_date(),
-            research_topic=_get_research_topic(state["messages"]),
-            number_queries=count,
+    plan_obj = state.get("plan")
+    plan = ResearchPlan.model_validate(plan_obj) if plan_obj else None
+
+    if not plan or not plan.sections:
+        result = llm.with_structured_output(SearchQueryList).invoke(
+            QUERY_WRITER_PROMPT.format(
+                current_date=_current_date(),
+                research_topic=_get_research_topic(state["messages"]),
+                number_queries=count,
+            )
         )
-    )
-    return {"query_list": result.query}  # type: ignore[union-attr]
+        return {
+            "query_list": [
+                {"search_query": q, "section_id": "unplanned"}
+                for q in result.query  # type: ignore[union-attr]
+            ]
+        }
+
+    query_list: list[dict[str, str]] = []
+    topic = _get_research_topic(state["messages"])
+    for section in plan.sections:
+        key_questions = "\n".join(f"- {q}" for q in section.key_questions) or "- n/a"
+        result = llm.with_structured_output(SearchQueryList).invoke(
+            SECTION_QUERY_WRITER_PROMPT.format(
+                current_date=_current_date(),
+                research_topic=topic,
+                section_id=section.id,
+                section_title=section.title,
+                section_goal=section.goal,
+                section_key_questions=key_questions,
+                number_queries=count,
+            )
+        )
+        for query in result.query:  # type: ignore[union-attr]
+            query_list.append({"search_query": query, "section_id": section.id})
+    return {"query_list": query_list}
 
 
 def continue_to_web_research(state: QueryGenerationState) -> list[Send]:
     return [
-        Send("web_research", {"search_query": q, "id": i})
-        for i, q in enumerate(state["query_list"])
+        Send(
+            "web_research",
+            {
+                "search_query": item["search_query"],
+                "id": i,
+                "section_id": item["section_id"],
+            },
+        )
+        for i, item in enumerate(state["query_list"])
     ]
 
 
@@ -469,6 +520,9 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
         "marker_sources": marker_sources,
         "search_query": [state["search_query"]],
         "web_research_result": [text_with_citations],
+        "section_results": {state["section_id"]: [text_with_citations]},
+        "section_queries": {state["section_id"]: [state["search_query"]]},
+        "section_marker_sources": {state["section_id"]: marker_sources},
     }
 
 
@@ -504,7 +558,11 @@ def evaluate_research(
     return [
         Send(
             "web_research",
-            {"search_query": q, "id": state["number_of_ran_queries"] + i},
+            {
+                "search_query": q,
+                "id": state["number_of_ran_queries"] + i,
+                "section_id": "follow_up",
+            },
         )
         for i, q in enumerate(state["follow_up_queries"])
     ]
