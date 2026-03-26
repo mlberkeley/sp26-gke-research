@@ -33,8 +33,8 @@ class Configuration(BaseModel):
     reflection_model: str = Field(default="gemini-2.5-flash")
     answer_model: str = Field(default="gemini-2.5-flash")
     number_of_initial_queries: int = Field(default=3)
-    max_research_loops: int = Field(default=2)
-    max_citations_per_search: int = Field(default=50)
+    max_research_loops: int = Field(default=1)
+    max_citations_per_search: int = Field(default=20)
 
     @classmethod
     def from_runnable_config(
@@ -183,9 +183,30 @@ Write a clear, thorough answer with inline citations (e.g. [1], [2]) where relev
 SourceRef = dict[str, str]
 
 
-class _ExtractedCitation(TypedDict):
+class _CitationEntry(TypedDict):
     end: int
     sources: list[SourceRef]
+
+
+def _content_to_text(content: Any) -> str:
+    """Best-effort conversion of LangChain/Gemini message content to plain text."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                # Common multimodal message formats store text under keys like "text" or "content".
+                text_val = part.get("text") or part.get("content") or ""
+                parts.append(str(text_val) if text_val else str(part))
+            else:
+                parts.append(str(part))
+        return "".join(parts)
+    return str(content)
 
 
 def _extract_sources(
@@ -207,21 +228,21 @@ def _extract_sources(
         chunks = getattr(meta, "grounding_chunks", []) or []
         supports = getattr(meta, "grounding_supports", []) or []
 
-        citations: list[_ExtractedCitation] = []
+        citations: list[_CitationEntry] = []
         for support in supports:
             seg = getattr(support, "segment", None)
             if not seg:
                 continue
             indices = getattr(support, "grounding_chunk_indices", [])
-            segs = []
+            segs: list[SourceRef] = []
             for idx in indices:
                 if idx < len(chunks):
                     web = getattr(chunks[idx], "web", None)
                     if web:
                         segs.append(
                             {
-                                "url": getattr(web, "uri", ""),
-                                "title": getattr(web, "title", ""),
+                                "url": str(getattr(web, "uri", "") or ""),
+                                "title": str(getattr(web, "title", "") or ""),
                             }
                         )
             if segs:
@@ -375,8 +396,7 @@ def finalize_answer(state: OverallState, config: RunnableConfig) -> OverallState
         )
     )
 
-    content = getattr(result, "content", "")
-    answer_text = content if isinstance(content, str) else ""
+    answer_text = _content_to_text(result.content)
     marker_id_strs = re.findall(r"\[(\d+)\]", answer_text)
     marker_ids = sorted({int(mid) for mid in marker_id_strs if mid})
 
@@ -384,42 +404,25 @@ def finalize_answer(state: OverallState, config: RunnableConfig) -> OverallState
     entries: list[dict[str, str]] = []
     seen_entries: set[tuple[int, str]] = set()
 
-    # UI-only remap: display dense ids [1..N] while keeping underlying
-    # `marker_sources` stable under the original marker ids.
-    known_marker_ids = [mid for mid in marker_ids if mid in marker_sources]
-    dense_marker_ids = {mid: i + 1 for i, mid in enumerate(known_marker_ids)}
-
-    def _remap_match(match: re.Match[str]) -> str:
-        original = int(match.group(1))
-        display = dense_marker_ids.get(original)
-        if display is None:
-            # Leave unknown markers untouched.
-            return match.group(0)
-        return f"[{display}]"
-
-    answer_text_dense = re.sub(r"\[(\d+)\]", _remap_match, answer_text)
-
-    for original_marker_id in known_marker_ids:
-        display_id = dense_marker_ids[original_marker_id]
-        for src in marker_sources.get(original_marker_id, []):
+    for marker_id in marker_ids:
+        for src in marker_sources.get(marker_id, []):
             url = src.get("url", "")
             if not url:
                 continue
-            key = (display_id, url)
+            key = (marker_id, url)
             if key in seen_entries:
                 continue
             seen_entries.add(key)
             entries.append(
                 {
-                    "marker_id": str(display_id),
-                    "original_marker_id": str(original_marker_id),
+                    "marker_id": str(marker_id),
                     "title": src.get("title", "No title"),
                     "url": url,
                 }
             )
 
     return {
-        "messages": [AIMessage(content=answer_text_dense)],
+        "messages": [AIMessage(content=answer_text)],
         "sources_gathered": entries,
     }  # type: ignore[typeddict-item]
 
