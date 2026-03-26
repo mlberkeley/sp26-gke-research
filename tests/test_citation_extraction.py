@@ -278,3 +278,31 @@ def test_web_research_returns_section_scoped_outputs(monkeypatch) -> None:
     assert result["section_queries"] == {"findings": ["query"]}
     assert result["section_results"] == {"findings": ["text [21]"]}
     assert "findings" in result["section_marker_sources"]
+
+
+def test_build_section_synthesis_payload_orders_sections() -> None:
+    plan = ra.ResearchPlan(
+        topic_rewrite="T",
+        overall_success_criteria="C",
+        sections=[
+            ra.PlanSection(id="b", title="B", goal="Goal B"),
+            ra.PlanSection(id="a", title="A", goal="Goal A"),
+        ],
+    )
+    payload = ra._build_section_synthesis_payload(
+        plan=plan,
+        section_order=["a", "b"],
+        section_results={"a": ["A1"], "b": ["B1"]},
+        fallback_summaries=[],
+    )
+    assert payload.index("id: a") < payload.index("id: b")
+
+
+def test_build_section_synthesis_payload_marks_no_evidence() -> None:
+    payload = ra._build_section_synthesis_payload(
+        plan=None,
+        section_order=["scope_and_definitions"],
+        section_results={},
+        fallback_summaries=["legacy summary"],
+    )
+    assert "- (no evidence)" in payload
