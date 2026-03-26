@@ -32,7 +32,7 @@ class Configuration(BaseModel):
     query_generator_model: str = Field(default="gemini-2.5-flash")
     reflection_model: str = Field(default="gemini-2.5-flash")
     answer_model: str = Field(default="gemini-2.5-flash")
-    number_of_initial_queries: int = Field(default=3)
+    number_of_initial_queries: int = Field(default=1)
     max_research_loops: int = Field(default=1)
     max_citations_per_search: int = Field(default=10)
 
@@ -107,6 +107,18 @@ def merge_section_marker_sources(
     return out
 
 
+def merge_section_evidence_items(
+    left: dict[str, list[EvidenceItem]],
+    right: dict[str, list[EvidenceItem]],
+) -> dict[str, list[EvidenceItem]]:
+    """Reducer for section-scoped structured evidence objects."""
+    out: dict[str, list[EvidenceItem]] = {k: list(v) for k, v in left.items()}
+    for section_id, items in right.items():
+        out.setdefault(section_id, [])
+        out[section_id].extend(items)
+    return out
+
+
 class OverallState(TypedDict):
     messages: Annotated[list, add_messages]
     plan: ResearchPlan | None
@@ -116,6 +128,10 @@ class OverallState(TypedDict):
     section_marker_sources: Annotated[
         dict[str, dict[int, list[dict[str, str]]]],
         merge_section_marker_sources,
+    ]
+    section_evidence_items: Annotated[
+        dict[str, list[EvidenceItem]],
+        merge_section_evidence_items,
     ]
     search_query: Annotated[list, operator.add]
     web_research_result: Annotated[list, operator.add]
@@ -187,6 +203,26 @@ class ResearchPlan(BaseModel):
     )
     sections: list[PlanSection] = Field(
         default_factory=list, description="Ordered plan sections for this topic."
+    )
+
+
+SourceRef = dict[str, str]
+
+
+class EvidenceItem(BaseModel):
+    evidence_bullet: str = Field(
+        description="Atomic evidence statement grounded in one source."
+    )
+    source: SourceRef = Field(
+        description="Source metadata with at least URL and optional title."
+    )
+    reasoning: str = Field(
+        description="Why this evidence matters for the current section."
+    )
+    section_id: str = Field(description="Section id this evidence supports.")
+    search_query: str = Field(description="Query that produced this evidence.")
+    marker_id: int | None = Field(
+        default=None, description="Optional citation marker id for traceability."
     )
 
 
@@ -292,8 +328,6 @@ Do not print the checklist."""
 
 
 # ── Citation helpers ─────────────────────────────────────────────────────────
-
-SourceRef = dict[str, str]
 
 
 class _CitationEntry(TypedDict):
@@ -717,6 +751,7 @@ def run() -> int:
         "section_results": {},
         "section_queries": {},
         "section_marker_sources": {},
+        "section_evidence_items": {},
         "search_query": [],
         "web_research_result": [],
         "marker_sources": {},
