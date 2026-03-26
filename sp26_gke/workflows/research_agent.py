@@ -126,6 +126,33 @@ class Reflection(BaseModel):
     )
 
 
+class PlanSection(BaseModel):
+    id: str = Field(description="Stable section identifier in snake_case.")
+    title: str = Field(description="Human-readable section heading.")
+    goal: str = Field(description="What this section should establish.")
+    key_questions: list[str] = Field(
+        default_factory=list, description="Key research questions for this section."
+    )
+    query_hints: list[str] = Field(
+        default_factory=list, description="Helpful seed terms for search query writing."
+    )
+    required: bool = Field(
+        default=False, description="Whether this section is required in the report."
+    )
+
+
+class ResearchPlan(BaseModel):
+    topic_rewrite: str = Field(
+        description="Optional clarified rewrite of the original research topic."
+    )
+    overall_success_criteria: str = Field(
+        description="How to judge whether this research run is complete."
+    )
+    sections: list[PlanSection] = Field(
+        default_factory=list, description="Ordered plan sections for this topic."
+    )
+
+
 # ── Prompts ──────────────────────────────────────────────────────────────────
 
 
@@ -140,6 +167,24 @@ def _get_research_topic(messages: list) -> str:
         if isinstance(msg, dict) and msg.get("role") == "user":
             return msg["content"]
     return str(messages[0]) if messages else ""
+
+
+PLANNER_PROMPT = """Create a topic-adaptive research plan for this technical research task.
+Current date: {current_date}
+Topic: {research_topic}
+
+Build an ordered plan with 5-10 sections and these rules:
+- Preserve intent for required rigor sections:
+  - Executive_summary
+  - Scope_and_definitions
+  - Findings (with topic-adaptive sub-areas)
+  - Evidence_and_credibility_notes
+  - Open_questions_and_gaps
+  - Sources
+- Add domain-specific sections only when they are warranted by the topic.
+- For each section include: id (snake_case), title, goal, 3-6 key_questions, 2-4 query_hints, and required.
+
+Respond as JSON matching the provided schema exactly."""
 
 
 QUERY_WRITER_PROMPT = """Generate {number_queries} diverse, targeted web search queries to research this topic.
@@ -306,6 +351,33 @@ def _make_llm(model: str) -> ChatGoogleGenerativeAI:
     )
 
 
+def _plan_to_brief(plan: ResearchPlan) -> str:
+    lines = [
+        "Research plan:",
+        f"- topic_rewrite: {plan.topic_rewrite}",
+        f"- success_criteria: {plan.overall_success_criteria}",
+    ]
+    for idx, section in enumerate(plan.sections, 1):
+        req = "required" if section.required else "optional"
+        lines.append(f"{idx}. [{section.id}] {section.title} ({req})")
+        lines.append(f"   goal: {section.goal}")
+    return "\n".join(lines)
+
+
+def plan_research(state: OverallState, config: RunnableConfig) -> OverallState:
+    cfg = Configuration.from_runnable_config(config)
+    llm = _make_llm(cfg.query_generator_model)
+    result = llm.with_structured_output(ResearchPlan).invoke(
+        PLANNER_PROMPT.format(
+            current_date=_current_date(),
+            research_topic=_get_research_topic(state["messages"]),
+        )
+    )
+    plan = ResearchPlan.model_validate(result)
+    plan_brief = _plan_to_brief(plan)
+    return {"messages": [AIMessage(content=plan_brief)]}  # type: ignore[typeddict-item]
+
+
 def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerationState:
     cfg = Configuration.from_runnable_config(config)
     count = state.get("initial_search_query_count") or cfg.number_of_initial_queries
@@ -447,11 +519,13 @@ def finalize_answer(state: OverallState, config: RunnableConfig) -> OverallState
 # ── Build graph ──────────────────────────────────────────────────────────────
 
 builder = StateGraph(OverallState, config_schema=Configuration)  # type: ignore[call-arg]
+builder.add_node("plan_research", plan_research)
 builder.add_node("generate_query", generate_query)
 builder.add_node("web_research", web_research)
 builder.add_node("reflection", reflection)
 builder.add_node("finalize_answer", finalize_answer)
-builder.add_edge(START, "generate_query")
+builder.add_edge(START, "plan_research")
+builder.add_edge("plan_research", "generate_query")
 builder.add_conditional_edges(
     "generate_query", continue_to_web_research, ["web_research"]
 )
