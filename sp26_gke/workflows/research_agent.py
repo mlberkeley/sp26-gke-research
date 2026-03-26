@@ -417,6 +417,45 @@ def _plan_to_brief(plan: ResearchPlan) -> str:
     return "\n".join(lines)
 
 
+def _build_section_synthesis_payload(
+    *,
+    plan: ResearchPlan | None,
+    section_order: list[str],
+    section_results: dict[str, list[str]],
+    fallback_summaries: list[str],
+    max_snippets_per_section: int = 3,
+) -> str:
+    if not section_order:
+        return "\n\n---\n\n".join(fallback_summaries)
+
+    section_map: dict[str, PlanSection] = {}
+    if plan:
+        section_map = {section.id: section for section in plan.sections}
+
+    parts: list[str] = []
+    for idx, section_id in enumerate(section_order, 1):
+        section = section_map.get(section_id)
+        title = section.title if section else section_id.replace("_", " ").title()
+        goal = section.goal if section else "Summarize findings for this section."
+        snippets = section_results.get(section_id, [])[:max_snippets_per_section]
+        snippets_text = (
+            "\n".join(f"- {snippet}" for snippet in snippets) or "- (no evidence)"
+        )
+        parts.append(
+            "\n".join(
+                [
+                    f"SECTION {idx}",
+                    f"id: {section_id}",
+                    f"title: {title}",
+                    f"goal: {goal}",
+                    "evidence_snippets:",
+                    snippets_text,
+                ]
+            )
+        )
+    return "\n\n---\n\n".join(parts)
+
+
 def plan_research(state: OverallState, config: RunnableConfig) -> OverallState:
     cfg = Configuration.from_runnable_config(config)
     llm = _make_llm(cfg.query_generator_model)
@@ -576,11 +615,19 @@ def finalize_answer(state: OverallState, config: RunnableConfig) -> OverallState
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
     )
+    plan_obj = state.get("plan")
+    plan = ResearchPlan.model_validate(plan_obj) if plan_obj else None
+    section_payload = _build_section_synthesis_payload(
+        plan=plan,
+        section_order=state.get("section_order", []),
+        section_results=state.get("section_results", {}),
+        fallback_summaries=state["web_research_result"],
+    )
     result = llm.invoke(
         ANSWER_PROMPT.format(
             current_date=_current_date(),
             research_topic=_get_research_topic(state["messages"]),
-            summaries="\n\n---\n\n".join(state["web_research_result"]),
+            summaries=section_payload,
         )
     )
 
