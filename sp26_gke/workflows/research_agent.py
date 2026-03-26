@@ -34,7 +34,7 @@ class Configuration(BaseModel):
     answer_model: str = Field(default="gemini-2.5-flash")
     number_of_initial_queries: int = Field(default=3)
     max_research_loops: int = Field(default=1)
-    max_citations_per_search: int = Field(default=20)
+    max_citations_per_search: int = Field(default=10)
 
     @classmethod
     def from_runnable_config(
@@ -790,6 +790,7 @@ def run() -> int:
     except Exception:
         # Fallback to updates-only streaming (older LangGraph versions), and use invoke for
         # final output if we can't capture final values.
+        last_values = None
         for chunk in graph_runner.stream(inputs, stream_mode="updates"):
             if not isinstance(chunk, dict):
                 continue
