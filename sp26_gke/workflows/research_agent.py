@@ -670,8 +670,29 @@ def run() -> int:
             return s
         return s[: max_len - 1] + "…"
 
+    def _section_counts(state_values: dict[str, Any], key: str) -> dict[str, int]:
+        raw = state_values.get(key, {})
+        if not isinstance(raw, dict):
+            return {}
+        out: dict[str, int] = {}
+        for section_id, items in raw.items():
+            if isinstance(section_id, str) and isinstance(items, list):
+                out[section_id] = len(items)
+        return out
+
     def _print_progress_from_update(node: str, update: dict[str, Any]) -> None:
         match node:
+            case "plan_research":
+                section_order = update.get("section_order")
+                if isinstance(section_order, list) and section_order:
+                    print(
+                        f"→ plan_research: planned {len(section_order)} sections",
+                        flush=True,
+                    )
+                    for i, section_id in enumerate(section_order, 1):
+                        print(f"  - [{i}] {section_id}", flush=True)
+                else:
+                    print("→ plan_research", flush=True)
             case "generate_query":
                 # Not guaranteed to exist in the update chunk, but if present, print it.
                 queries = update.get("query_list")
@@ -680,18 +701,27 @@ def run() -> int:
                         f"→ generate_query: generated {len(queries)} queries",
                         flush=True,
                     )
-                    for i, q in enumerate(queries):
-                        print(f"  - [{i}] {q}", flush=True)
+                    by_section: dict[str, int] = {}
+                    for item in queries:
+                        if isinstance(item, dict):
+                            section_id = str(item.get("section_id", "unplanned"))
+                            by_section[section_id] = by_section.get(section_id, 0) + 1
+                    for section_id, count in sorted(by_section.items()):
+                        print(f"  - {section_id}: {count} queries", flush=True)
                 else:
                     print("→ generate_query", flush=True)
             case "web_research":
+                section_results = update.get("section_results")
+                if isinstance(section_results, dict) and section_results:
+                    section_id = next(iter(section_results.keys()))
+                    print(f"→ web_research: section={section_id}", flush=True)
                 q = update.get("search_query")
                 if isinstance(q, list) and q:
                     # Reducer appends, so the newest is the last.
                     newest = str(q[-1])
-                    print(f'→ web_research: searching "{newest}"', flush=True)
+                    print(f'  searching "{newest}"', flush=True)
                 elif isinstance(q, str):
-                    print(f'→ web_research: searching "{q}"', flush=True)
+                    print(f'  searching "{q}"', flush=True)
                 else:
                     print("→ web_research", flush=True)
 
@@ -745,6 +775,18 @@ def run() -> int:
                         print(f"→ {node}", flush=True)
             elif mode == "values" and isinstance(chunk, dict):
                 last_values = chunk
+                query_counts = _section_counts(chunk, "section_queries")
+                evidence_counts = _section_counts(chunk, "section_results")
+                if query_counts or evidence_counts:
+                    print("  section progress:", flush=True)
+                    section_ids = sorted(set(query_counts) | set(evidence_counts))
+                    for section_id in section_ids:
+                        q_count = query_counts.get(section_id, 0)
+                        e_count = evidence_counts.get(section_id, 0)
+                        print(
+                            f"  - {section_id}: queries={q_count} evidence={e_count}",
+                            flush=True,
+                        )
     except Exception:
         # Fallback to updates-only streaming (older LangGraph versions), and use invoke for
         # final output if we can't capture final values.
