@@ -49,6 +49,7 @@ langgraph = "*"
 langchain-google-genai = "*"
 google-genai = "*"
 httpx = "*"
+asyncpg = "*"
 
 [feature.py_plotting.dependencies]
 matplotlib = "*"

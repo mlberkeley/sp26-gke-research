@@ -6,11 +6,13 @@ Based on: https://towardsdatascience.com/langgraph-101-lets-build-a-deep-researc
 
 from __future__ import annotations
 
+import asyncio
 import operator
 import os
 import re
 import sys
 import threading
+import uuid
 from datetime import datetime
 from typing import Annotated, Any, TypedDict
 
@@ -679,6 +681,17 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     except Exception:
         pass
 
+    run_id = config.get("configurable", {}).get("run_id")
+    if run_id and evidence_items and os.getenv("DATABASE_URL"):
+        try:
+            from sp26_gke.workflows.research_db import ResearchDB
+
+            evidence_objects = [Evidence(**e) for e in evidence_items]
+            db = ResearchDB()
+            asyncio.run(db.insert_evidence_batch(run_id, evidence_objects))
+        except Exception:
+            pass
+
     return {  # type: ignore[typeddict-item]
         "marker_sources": marker_sources,
         "search_query": [state["search_query"]],
@@ -818,6 +831,16 @@ def run() -> int:
         return 1
 
     question = " ".join(sys.argv[1:])
+    run_id = str(uuid.uuid4())
+    persist = bool(os.getenv("DATABASE_URL"))
+
+    if persist:
+        from sp26_gke.workflows.research_db import ResearchDB
+
+        db = ResearchDB()
+        asyncio.run(db.create_run(run_id, question))
+        print(f"run_id={run_id}  (persisting to CloudSQL)")
+
     print(f"\nResearching: {question}\n")
 
     inputs: dict[str, Any] = {
@@ -935,9 +958,11 @@ def run() -> int:
 
     # Stream both per-node updates (for progress) and full values (for final output).
     graph_runner: Any = graph
+    config: dict[str, Any] = {"configurable": {"run_id": run_id}}
     try:
         stream_iter = graph_runner.stream(
             inputs,
+            config=config,
             stream_mode=["updates", "values"],
         )
         for mode, chunk in stream_iter:
@@ -965,7 +990,7 @@ def run() -> int:
         # Fallback to updates-only streaming (older LangGraph versions), and use invoke for
         # final output if we can't capture final values.
         last_values = None
-        for chunk in graph_runner.stream(inputs, stream_mode="updates"):
+        for chunk in graph_runner.stream(inputs, config=config, stream_mode="updates"):
             if not isinstance(chunk, dict):
                 continue
             for node, update in chunk.items():
@@ -976,7 +1001,7 @@ def run() -> int:
 
     if last_values is None:
         # If we couldn't capture final state via streaming, do a normal run to get it.
-        last_values = graph_runner.invoke(inputs)
+        last_values = graph_runner.invoke(inputs, config=config)
 
     messages = last_values.get("messages", [])
     if messages:
@@ -989,6 +1014,10 @@ def run() -> int:
             marker_label = s.get("marker_id")
             label = marker_label if marker_label else "?"
             print(f"[{label}] {s.get('title', 'No title')}\n    {s.get('url', '')}")
+
+    if persist:
+        asyncio.run(db.complete_run(run_id))
+        print(f"\n✓ Run {run_id} persisted to CloudSQL.")
 
     return 0
 
