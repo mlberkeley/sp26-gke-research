@@ -48,6 +48,7 @@ grpcio = "*"
 langgraph = "*"
 langchain-google-genai = "*"
 google-genai = "*"
+httpx = "*"
 
 [feature.py_plotting.dependencies]
 matplotlib = "*"

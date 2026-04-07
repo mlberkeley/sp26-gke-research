@@ -10,10 +10,12 @@ import operator
 import os
 import re
 import sys
+import threading
 from datetime import datetime
 from typing import Annotated, Any, TypedDict
 
 import google.genai as genai
+import httpx
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
@@ -21,7 +23,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import Send
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 load_dotenv()
 
@@ -112,6 +114,7 @@ class OverallState(TypedDict):
     plan: ResearchPlan | None
     section_order: list[str]
     section_results: Annotated[dict[str, list[str]], merge_section_lists]
+    section_evidence: Annotated[dict[str, list[dict]], merge_section_lists]
     section_queries: Annotated[dict[str, list[str]], merge_section_lists]
     section_marker_sources: Annotated[
         dict[str, dict[int, list[dict[str, str]]]],
@@ -160,6 +163,41 @@ class Reflection(BaseModel):
     knowledge_gap: str = Field(description="What information is missing.")
     follow_up_queries: list[str] = Field(
         default_factory=list, description="Follow-up search queries."
+    )
+
+
+class Evidence(BaseModel):
+    query_plan_id: str = Field(
+        description="The section id from the research plan this evidence belongs to"
+    )
+    claim: str = Field(
+        description="A single complete-sentence claim extracted from the source. "
+        "Do not merge multiple claims into one."
+    )
+    source_url: str = Field(description="The URL this claim came from")
+    retrieval_query: str = Field(
+        description="The search query that surfaced this source"
+    )
+
+    @field_validator("claim")
+    @classmethod
+    def claim_not_empty(cls, v: str) -> str:
+        if len(v.strip()) < 10:
+            raise ValueError("Claim too short to be a meaningful evidence object")
+        return v.strip()
+
+    @field_validator("source_url")
+    @classmethod
+    def valid_url(cls, v: str) -> str:
+        if not v.startswith("http"):
+            raise ValueError("source_url must be a valid URL")
+        return v
+
+
+class EvidenceList(BaseModel):
+    items: list[Evidence] = Field(
+        description="All atomic evidence objects extracted from this web research step. "
+        "One object per claim per source."
     )
 
 
@@ -387,26 +425,70 @@ def _extract_sources(
     return marker_sources, text
 
 
+def canonicalize_url(url: str) -> str:
+    """Resolve Vertex redirect URLs to their real destination."""
+    if "grounding-api-redirect" not in url and "vertexaisearch" not in url:
+        return url
+    try:
+        with httpx.Client() as client:
+            r = client.head(url, follow_redirects=True, timeout=5.0)
+            return str(r.url)
+    except Exception:
+        return url
+
+
+EVIDENCE_EXTRACTION_PROMPT = """Extract atomic evidence objects from the following web research text.
+
+Section ID: {section_id}
+Search query: {search_query}
+
+Citation marker -> URL mapping:
+{marker_url_mapping}
+
+Web research text:
+{text}
+
+Rules:
+- Extract one Evidence object per distinct factual claim per source.
+- Do NOT summarize or rewrite claims — extract them as written in the text.
+- Map each citation marker [N] back to its URL using the mapping above.
+- If a claim has no citation marker, skip it.
+- query_plan_id must be the section_id provided above.
+- retrieval_query must be the search query provided above.
+
+Respond as JSON matching the provided schema exactly."""
+
+
 # ── Nodes ────────────────────────────────────────────────────────────────────
 
 _genai_client: genai.Client | None = None
+_genai_lock = threading.Lock()
 
 
 def _get_genai_client() -> genai.Client:
-    """Create the Gemini client lazily (avoid requiring API key at import time)."""
+    """
+    Return a thread-safe singleton Gemini client.
+
+    A single long-lived client avoids the 'client has been closed' error that occurs
+    when short-lived clients are GC'd while parallel threads are mid-request through the
+    shared httpx transport.
+    """
     global _genai_client
     if _genai_client is not None:
         return _genai_client
 
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "Missing GEMINI_API_KEY. Set it in your environment (or .env) to run web "
-            "research."
-        )
+    with _genai_lock:
+        if _genai_client is not None:
+            return _genai_client
 
-    _genai_client = genai.Client(api_key=api_key)
-    return _genai_client
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "Missing GEMINI_API_KEY. Set it in your environment (or .env) to run "
+                "web research."
+            )
+        _genai_client = genai.Client(api_key=api_key)
+        return _genai_client
 
 
 def _make_llm(model: str) -> ChatGoogleGenerativeAI:
@@ -555,7 +637,8 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
         search_id = 0
 
     citation_base = search_id * cfg.max_citations_per_search
-    response = _get_genai_client().models.generate_content(
+    client = _get_genai_client()
+    response = client.models.generate_content(
         model=cfg.query_generator_model,
         contents=WEB_SEARCHER_PROMPT.format(
             current_date=_current_date(),
@@ -569,11 +652,39 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
         citation_base=citation_base,
         max_citations_per_search=cfg.max_citations_per_search,
     )
+
+    # Build marker -> URL mapping string for the extraction prompt.
+    marker_lines: list[str] = []
+    for marker_id, srcs in sorted(marker_sources.items()):
+        urls = [s.get("url", "") for s in srcs if s.get("url")]
+        if urls:
+            marker_lines.append(f"[{marker_id}] -> {urls[0]}")
+    marker_url_mapping = "\n".join(marker_lines) or "(no citation markers found)"
+
+    evidence_items: list[dict] = []
+    try:
+        llm = _make_llm(cfg.query_generator_model)
+        ev_result = llm.with_structured_output(EvidenceList).invoke(
+            EVIDENCE_EXTRACTION_PROMPT.format(
+                section_id=state["section_id"],
+                search_query=state["search_query"],
+                marker_url_mapping=marker_url_mapping,
+                text=text_with_citations,
+            )
+        )
+        if ev_result and hasattr(ev_result, "items") and ev_result.items:
+            for item in ev_result.items:  # type: ignore[union-attr]
+                item.source_url = canonicalize_url(item.source_url)
+                evidence_items.append(item.model_dump())
+    except Exception:
+        pass
+
     return {  # type: ignore[typeddict-item]
         "marker_sources": marker_sources,
         "search_query": [state["search_query"]],
         "web_research_result": [text_with_citations],
         "section_results": {state["section_id"]: [text_with_citations]},
+        "section_evidence": {state["section_id"]: evidence_items},
         "section_queries": {state["section_id"]: [state["search_query"]]},
         "section_marker_sources": {state["section_id"]: marker_sources},
     }
@@ -714,6 +825,7 @@ def run() -> int:
         "plan": None,
         "section_order": [],
         "section_results": {},
+        "section_evidence": {},
         "section_queries": {},
         "section_marker_sources": {},
         "search_query": [],
