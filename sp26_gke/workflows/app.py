@@ -25,10 +25,92 @@ st.title("Deep Research Agent")
 
 
 def _trim(text: str, max_len: int = 160) -> str:
-    s = " ".join(text.split())
-    if len(s) <= max_len:
-        return s
-    return s[: max_len - 1] + "…"
+    compact_text = " ".join(text.split())
+    if len(compact_text) <= max_len:
+        return compact_text
+    return compact_text[: max_len - 1] + "…"
+
+
+def _snapshot_node_state(node_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Create a compact, display-ready state snapshot for a workflow node."""
+    state_snapshot: dict[str, Any] = {
+        "node": node_id,
+        "recorded_at": time.strftime("%H:%M:%S"),
+        "status": "running",
+        "summary": "update received",
+    }
+
+    if node_id == "plan_research":
+        planned_sections = payload.get("section_order")
+        section_count = (
+            len(planned_sections) if isinstance(planned_sections, list) else 0
+        )
+        state_snapshot["summary"] = f"planned {section_count} sections"
+        state_snapshot["section_count"] = section_count
+
+    elif node_id == "generate_query":
+        generated_queries = payload.get("query_list")
+        query_count = (
+            len(generated_queries) if isinstance(generated_queries, list) else 0
+        )
+        state_snapshot["summary"] = f"generated {query_count} queries"
+        state_snapshot["query_count"] = query_count
+
+    elif node_id == "web_research":
+        current_section_id = ""
+        node_section_results = payload.get("section_results")
+        if isinstance(node_section_results, dict) and node_section_results:
+            current_section_id = str(next(iter(node_section_results.keys())))
+        node_marker_sources = payload.get("marker_sources")
+        marker_count = (
+            len(node_marker_sources) if isinstance(node_marker_sources, dict) else 0
+        )
+        summary_parts: list[str] = []
+        if current_section_id:
+            summary_parts.append(f"section={current_section_id}")
+            state_snapshot["section_id"] = current_section_id
+        summary_parts.append(f"markers={marker_count}")
+        state_snapshot["summary"] = " ".join(summary_parts)
+        state_snapshot["marker_count"] = marker_count
+
+    elif node_id == "reflection":
+        reflection_sufficient = payload.get("is_sufficient")
+        reflection_loop = payload.get("research_loop_count")
+        summary_parts = []
+        if reflection_sufficient is not None:
+            summary_parts.append(f"sufficient={str(reflection_sufficient).lower()}")
+            state_snapshot["is_sufficient"] = reflection_sufficient
+            if reflection_sufficient:
+                state_snapshot["status"] = "complete"
+        if reflection_loop is not None:
+            summary_parts.append(f"loop={reflection_loop}")
+            state_snapshot["loop"] = reflection_loop
+        reflection_gap = payload.get("knowledge_gap")
+        if reflection_gap:
+            summary_parts.append(f'gap="{_trim(str(reflection_gap), max_len=80)}"')
+        state_snapshot["summary"] = (
+            " ".join(summary_parts) if summary_parts else "reflection update"
+        )
+
+    elif node_id == "finalize_answer":
+        state_snapshot["status"] = "complete"
+        state_snapshot["summary"] = "final report generated"
+
+    return state_snapshot
+
+
+def _ordered_nodes(latest_by_node: dict[str, dict[str, Any]]) -> list[str]:
+    """Sort known workflow nodes first and keep unknown nodes after."""
+    workflow_order = [
+        "plan_research",
+        "generate_query",
+        "web_research",
+        "reflection",
+        "finalize_answer",
+    ]
+    known = [name for name in workflow_order if name in latest_by_node]
+    unknown = sorted([name for name in latest_by_node if name not in workflow_order])
+    return known + unknown
 
 
 topic = st.text_input("Research topic", placeholder="e.g. state of LPU hardware")
@@ -62,10 +144,13 @@ if run_button and topic:
     report_placeholder = st.empty()
     sources_placeholder = st.empty()
     evidence_placeholder = st.empty()
+    node_states_placeholder = st.empty()
     db_placeholder = st.empty()
     checkpoints_placeholder = st.empty()
 
     last_values: dict[str, Any] | None = None
+    node_latest_state: dict[str, dict[str, Any]] = {}
+    node_timeline: list[dict[str, Any]] = []
 
     if persist:
         from sp26_gke.workflows.research_db import ResearchDB
@@ -166,6 +251,10 @@ if run_button and topic:
                             else:
                                 status.write(f"→ {node_name}")
 
+                            snapshot = _snapshot_node_state(node_name, update)
+                            node_latest_state[node_name] = snapshot
+                            node_timeline.append(snapshot)
+
                             if db is not None:
                                 checkpoint_id = f"{run_id}:{node_name}:{time.time_ns()}"
                                 asyncio.run(
@@ -203,7 +292,16 @@ if run_button and topic:
                     if not isinstance(chunk, dict):
                         continue
                     for node, _update in chunk.items():
-                        status.write(f"→ {node}")
+                        node_name = str(node)
+                        status.write(f"→ {node_name}")
+                        fallback_snapshot = {
+                            "node": node_name,
+                            "recorded_at": time.strftime("%H:%M:%S"),
+                            "status": "running",
+                            "summary": "update received",
+                        }
+                        node_latest_state[node_name] = fallback_snapshot
+                        node_timeline.append(fallback_snapshot)
 
             if last_values is None:
                 last_values = graph_runner.invoke(inputs, config=config)
@@ -241,6 +339,34 @@ if run_button and topic:
                         claim = ev.get("claim", "")
                         url = ev.get("source_url", "")
                         st.markdown(f"- {claim}  \n  [source]({url})")
+
+    if node_latest_state:
+        with node_states_placeholder.container():
+            st.subheader("Node States")
+            st.caption("Latest state for each workflow node")
+
+            latest_rows: list[dict[str, Any]] = []
+            for node_name in _ordered_nodes(node_latest_state):
+                snapshot = node_latest_state[node_name]
+                latest_rows.append(
+                    {
+                        "node": node_name,
+                        "status": snapshot.get("status", "running"),
+                        "updated_at": snapshot.get("recorded_at", ""),
+                        "summary": snapshot.get("summary", ""),
+                    }
+                )
+            st.table(latest_rows)
+
+            with st.expander(
+                f"Execution Timeline ({len(node_timeline)} updates)", expanded=False
+            ):
+                for idx, snapshot in enumerate(node_timeline, start=1):
+                    st.markdown(
+                        f"{idx}. `{snapshot.get('recorded_at', '')}` "
+                        f"`{snapshot.get('node', '')}` "
+                        f"{snapshot.get('summary', '')}"
+                    )
 
     if persist:
         try:
