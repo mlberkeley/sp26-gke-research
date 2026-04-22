@@ -1,0 +1,31 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gke-research-agent
+  namespace: __NAMESPACE__
+  labels:
+    app: gke-research-agent
+spec:
+  schedule: "0 */6 * * *"
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 900
+      template:
+        metadata:
+          labels:
+            app: gke-research-agent
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: research-agent
+              image: __IMAGE__
+              imagePullPolicy: Always
+              env:
+                - name: GEMINI_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: research-agent-secrets
+                      key: gemini-api-key

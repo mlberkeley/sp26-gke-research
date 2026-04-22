@@ -13,6 +13,8 @@ geodata-preprocess = "python -m sp26_gke.geodata.cli preprocess"
 
 geodata-plot = "python sp26_gke/plotting/geodata/generate_figures.py"
 gke-dummy-job = "python -m sp26_gke.workflows.gke_dummy_job"
+research-agent = "python -m sp26_gke.workflows.research_agent"
+demo = "streamlit run sp26_gke/workflows/app.py"
 
 [dependencies]
 python = ">=3.12,<3.14"
@@ -39,6 +41,16 @@ pytorch = ">=2.1.0"
 torchvision = ">=0.16.0"
 scikit-learn = "*"
 scipy = "*"
+
+[feature.py_agent.dependencies]
+grpcio = "*"
+
+[feature.py_agent.pypi-dependencies]
+langgraph = "*"
+langchain-google-genai = "*"
+google-genai = "*"
+httpx = "*"
+asyncpg = "*"
 
 [feature.py_plotting.dependencies]
 matplotlib = "*"
@@ -79,12 +91,17 @@ go-sops = "*"
 age = "*"
 kubernetes-client = "*"
 
+[feature.py_web.pypi-dependencies]
+streamlit = "*"
+
 [environments]
 default = { features = [
   "infra",
   "py_utilities",
   "py_data_processing",
   "py_ml",
+  "py_agent",
+  "py_web",
   "py_plotting",
   "py_dev",
   "py_test",
