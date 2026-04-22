@@ -375,12 +375,15 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/ec/7e/46c5973bd8b10a5c4c8a77136cf536e658796380a17c740246074901b038/langchain_google_genai-4.2.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/52/38/3117cd90325635893a76132cdae74f5b1f53c93c33b3dc6124521cec9825/langgraph-1.1.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/65/4c/09a4a0c42f5d2fc38d6c4d67884788eff7fd2cfdf367fdf7033de908b4c0/langgraph_checkpoint-4.0.1-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/e8/87/b0f98b33a67204bca9d5619bcd9574222f6b025cf3c125eedcec9a50ecbc/langgraph_checkpoint_postgres-3.0.5-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/dc/41/ec966424ad3f2ed3996d24079d3342c8cd6c0bd0653c12b2a917a685ec6c/langgraph_prebuilt-1.0.8-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/13/c8/b8d15d4b9a320a3f57a851030a371066b91dbd1420f097d3d0338da9adc9/langgraph_sdk-0.3.11-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e8/46/9294d4f49de6a8f08e8b83907713ca545459d87d474c6add15d31a36f5dc/langsmith-0.7.20-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/c9/ec/c68e3b9021a31d9ec15a94931db1410136af862955854ed5dd7e7e4f5bff/orjson-3.11.7-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/1c/a2/072343e1413d9443e5a252a8eb591c2d5b1bffbe5e7bfc78c069361b92eb/ormsgpack-1.12.2-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/53/1b/3b431694a4dc6d37b9f653f0c64b0a0d9ec074ee810710c0c3da21d67ba7/protobuf-7.34.1-cp310-abi3-manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/c8/5b/181e2e3becb7672b502f0ed7f16ed7352aca7c109cfb94cf3878a9186db9/psycopg-3.3.3-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/e7/c3/26b8a0908a9db249de3b4169692e1c7c19048a9bc41a4d3209cee7dbb758/psycopg_pool-3.3.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5d/a0/7d793dce3fa811fe047d6ae2431c672364b462850c6235ae306c0efd025f/pyasn1-0.6.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/47/8d/d529b5d697919ba8c11ad626e835d4039be708a35b0d22de83a269a6682c/pyasn1_modules-0.4.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ab/4c/b888e6cf58bd9db9c93f40d1c6be8283ff49d88919231afe93a6bcf61626/pydeck-0.9.1-py2.py3-none-any.whl
@@ -764,12 +767,15 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/ec/7e/46c5973bd8b10a5c4c8a77136cf536e658796380a17c740246074901b038/langchain_google_genai-4.2.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/52/38/3117cd90325635893a76132cdae74f5b1f53c93c33b3dc6124521cec9825/langgraph-1.1.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/65/4c/09a4a0c42f5d2fc38d6c4d67884788eff7fd2cfdf367fdf7033de908b4c0/langgraph_checkpoint-4.0.1-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/e8/87/b0f98b33a67204bca9d5619bcd9574222f6b025cf3c125eedcec9a50ecbc/langgraph_checkpoint_postgres-3.0.5-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/dc/41/ec966424ad3f2ed3996d24079d3342c8cd6c0bd0653c12b2a917a685ec6c/langgraph_prebuilt-1.0.8-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/13/c8/b8d15d4b9a320a3f57a851030a371066b91dbd1420f097d3d0338da9adc9/langgraph_sdk-0.3.11-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e8/46/9294d4f49de6a8f08e8b83907713ca545459d87d474c6add15d31a36f5dc/langsmith-0.7.20-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/89/25/0a16e0729a0e6a1504f9d1a13cdd365f030068aab64cec6958396b9969d7/orjson-3.11.7-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
       - pypi: https://files.pythonhosted.org/packages/6e/31/5efa31346affdac489acade2926989e019e8ca98129658a183e3add7af5e/ormsgpack-1.12.2-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
       - pypi: https://files.pythonhosted.org/packages/eb/9d/aa69df2724ff63efa6f72307b483ce0827f4347cc6d6df24b59e26659fef/protobuf-7.34.1-cp310-abi3-manylinux2014_aarch64.whl
+      - pypi: https://files.pythonhosted.org/packages/c8/5b/181e2e3becb7672b502f0ed7f16ed7352aca7c109cfb94cf3878a9186db9/psycopg-3.3.3-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/e7/c3/26b8a0908a9db249de3b4169692e1c7c19048a9bc41a4d3209cee7dbb758/psycopg_pool-3.3.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5d/a0/7d793dce3fa811fe047d6ae2431c672364b462850c6235ae306c0efd025f/pyasn1-0.6.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/47/8d/d529b5d697919ba8c11ad626e835d4039be708a35b0d22de83a269a6682c/pyasn1_modules-0.4.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ab/4c/b888e6cf58bd9db9c93f40d1c6be8283ff49d88919231afe93a6bcf61626/pydeck-0.9.1-py2.py3-none-any.whl
@@ -1091,12 +1097,15 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/ec/7e/46c5973bd8b10a5c4c8a77136cf536e658796380a17c740246074901b038/langchain_google_genai-4.2.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/52/38/3117cd90325635893a76132cdae74f5b1f53c93c33b3dc6124521cec9825/langgraph-1.1.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/65/4c/09a4a0c42f5d2fc38d6c4d67884788eff7fd2cfdf367fdf7033de908b4c0/langgraph_checkpoint-4.0.1-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/e8/87/b0f98b33a67204bca9d5619bcd9574222f6b025cf3c125eedcec9a50ecbc/langgraph_checkpoint_postgres-3.0.5-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/dc/41/ec966424ad3f2ed3996d24079d3342c8cd6c0bd0653c12b2a917a685ec6c/langgraph_prebuilt-1.0.8-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/13/c8/b8d15d4b9a320a3f57a851030a371066b91dbd1420f097d3d0338da9adc9/langgraph_sdk-0.3.11-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e8/46/9294d4f49de6a8f08e8b83907713ca545459d87d474c6add15d31a36f5dc/langsmith-0.7.20-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/89/25/6e0e52cac5aab51d7b6dcd257e855e1dec1c2060f6b28566c509b4665f62/orjson-3.11.7-cp313-cp313-macosx_10_15_x86_64.macosx_11_0_arm64.macosx_10_15_universal2.whl
       - pypi: https://files.pythonhosted.org/packages/eb/29/bb0eba3288c0449efbb013e9c6f58aea79cf5cb9ee1921f8865f04c1a9d7/ormsgpack-1.12.2-cp313-cp313-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl
       - pypi: https://files.pythonhosted.org/packages/ec/11/3325d41e6ee15bf1125654301211247b042563bcc898784351252549a8ad/protobuf-7.34.1-cp310-abi3-macosx_10_9_universal2.whl
+      - pypi: https://files.pythonhosted.org/packages/c8/5b/181e2e3becb7672b502f0ed7f16ed7352aca7c109cfb94cf3878a9186db9/psycopg-3.3.3-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/e7/c3/26b8a0908a9db249de3b4169692e1c7c19048a9bc41a4d3209cee7dbb758/psycopg_pool-3.3.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5d/a0/7d793dce3fa811fe047d6ae2431c672364b462850c6235ae306c0efd025f/pyasn1-0.6.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/47/8d/d529b5d697919ba8c11ad626e835d4039be708a35b0d22de83a269a6682c/pyasn1_modules-0.4.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ab/4c/b888e6cf58bd9db9c93f40d1c6be8283ff49d88919231afe93a6bcf61626/pydeck-0.9.1-py2.py3-none-any.whl
@@ -1416,12 +1425,15 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/ec/7e/46c5973bd8b10a5c4c8a77136cf536e658796380a17c740246074901b038/langchain_google_genai-4.2.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/52/38/3117cd90325635893a76132cdae74f5b1f53c93c33b3dc6124521cec9825/langgraph-1.1.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/65/4c/09a4a0c42f5d2fc38d6c4d67884788eff7fd2cfdf367fdf7033de908b4c0/langgraph_checkpoint-4.0.1-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/e8/87/b0f98b33a67204bca9d5619bcd9574222f6b025cf3c125eedcec9a50ecbc/langgraph_checkpoint_postgres-3.0.5-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/dc/41/ec966424ad3f2ed3996d24079d3342c8cd6c0bd0653c12b2a917a685ec6c/langgraph_prebuilt-1.0.8-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/13/c8/b8d15d4b9a320a3f57a851030a371066b91dbd1420f097d3d0338da9adc9/langgraph_sdk-0.3.11-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e8/46/9294d4f49de6a8f08e8b83907713ca545459d87d474c6add15d31a36f5dc/langsmith-0.7.20-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/89/25/6e0e52cac5aab51d7b6dcd257e855e1dec1c2060f6b28566c509b4665f62/orjson-3.11.7-cp313-cp313-macosx_10_15_x86_64.macosx_11_0_arm64.macosx_10_15_universal2.whl
       - pypi: https://files.pythonhosted.org/packages/eb/29/bb0eba3288c0449efbb013e9c6f58aea79cf5cb9ee1921f8865f04c1a9d7/ormsgpack-1.12.2-cp313-cp313-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl
       - pypi: https://files.pythonhosted.org/packages/ec/11/3325d41e6ee15bf1125654301211247b042563bcc898784351252549a8ad/protobuf-7.34.1-cp310-abi3-macosx_10_9_universal2.whl
+      - pypi: https://files.pythonhosted.org/packages/c8/5b/181e2e3becb7672b502f0ed7f16ed7352aca7c109cfb94cf3878a9186db9/psycopg-3.3.3-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/e7/c3/26b8a0908a9db249de3b4169692e1c7c19048a9bc41a4d3209cee7dbb758/psycopg_pool-3.3.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5d/a0/7d793dce3fa811fe047d6ae2431c672364b462850c6235ae306c0efd025f/pyasn1-0.6.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/47/8d/d529b5d697919ba8c11ad626e835d4039be708a35b0d22de83a269a6682c/pyasn1_modules-0.4.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ab/4c/b888e6cf58bd9db9c93f40d1c6be8283ff49d88919231afe93a6bcf61626/pydeck-0.9.1-py2.py3-none-any.whl
@@ -5526,6 +5538,16 @@ packages:
   requires_dist:
   - langchain-core>=0.2.38
   - ormsgpack>=1.12.0
+  requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/e8/87/b0f98b33a67204bca9d5619bcd9574222f6b025cf3c125eedcec9a50ecbc/langgraph_checkpoint_postgres-3.0.5-py3-none-any.whl
+  name: langgraph-checkpoint-postgres
+  version: 3.0.5
+  sha256: 86d7040a88fd70087eaafb72251d796696a0a2d856168f5c11ef620771411552
+  requires_dist:
+  - langgraph-checkpoint>=2.1.2,<5.0.0
+  - orjson>=3.11.5
+  - psycopg-pool>=3.2.0
+  - psycopg>=3.2.0
   requires_python: '>=3.10'
 - pypi: https://files.pythonhosted.org/packages/dc/41/ec966424ad3f2ed3996d24079d3342c8cd6c0bd0653c12b2a917a685ec6c/langgraph_prebuilt-1.0.8-py3-none-any.whl
   name: langgraph-prebuilt
@@ -11705,6 +11727,53 @@ packages:
   - pkg:pypi/psutil?source=hash-mapping
   size: 242596
   timestamp: 1769678288893
+- pypi: https://files.pythonhosted.org/packages/c8/5b/181e2e3becb7672b502f0ed7f16ed7352aca7c109cfb94cf3878a9186db9/psycopg-3.3.3-py3-none-any.whl
+  name: psycopg
+  version: 3.3.3
+  sha256: f96525a72bcfade6584ab17e89de415ff360748c766f0106959144dcbb38c698
+  requires_dist:
+  - typing-extensions>=4.6 ; python_full_version < '3.13'
+  - tzdata ; sys_platform == 'win32'
+  - psycopg-c==3.3.3 ; implementation_name != 'pypy' and extra == 'c'
+  - psycopg-binary==3.3.3 ; implementation_name != 'pypy' and extra == 'binary'
+  - psycopg-pool ; extra == 'pool'
+  - anyio>=4.0 ; extra == 'test'
+  - mypy>=1.19.0 ; implementation_name != 'pypy' and extra == 'test'
+  - pproxy>=2.7 ; extra == 'test'
+  - pytest>=6.2.5 ; extra == 'test'
+  - pytest-cov>=3.0 ; extra == 'test'
+  - pytest-randomly>=3.5 ; extra == 'test'
+  - ast-comments>=1.1.2 ; extra == 'dev'
+  - black>=26.1.0 ; extra == 'dev'
+  - codespell>=2.2 ; extra == 'dev'
+  - cython-lint>=0.16 ; extra == 'dev'
+  - dnspython>=2.1 ; extra == 'dev'
+  - flake8>=4.0 ; extra == 'dev'
+  - isort[colors]>=6.0 ; extra == 'dev'
+  - isort-psycopg ; extra == 'dev'
+  - mypy>=1.19.0 ; extra == 'dev'
+  - pre-commit>=4.0.1 ; extra == 'dev'
+  - types-setuptools>=57.4 ; extra == 'dev'
+  - types-shapely>=2.0 ; extra == 'dev'
+  - wheel>=0.37 ; extra == 'dev'
+  - sphinx>=5.0 ; extra == 'docs'
+  - furo==2022.6.21 ; extra == 'docs'
+  - sphinx-autobuild>=2021.3.14 ; extra == 'docs'
+  - sphinx-autodoc-typehints>=1.12 ; extra == 'docs'
+  requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/e7/c3/26b8a0908a9db249de3b4169692e1c7c19048a9bc41a4d3209cee7dbb758/psycopg_pool-3.3.0-py3-none-any.whl
+  name: psycopg-pool
+  version: 3.3.0
+  sha256: 2e44329155c410b5e8666372db44276a8b1ebd8c90f1c3026ebba40d4bc81063
+  requires_dist:
+  - typing-extensions>=4.6
+  - anyio>=4.0 ; extra == 'test'
+  - mypy>=1.14 ; extra == 'test'
+  - pproxy>=2.7 ; extra == 'test'
+  - pytest>=6.2.5 ; extra == 'test'
+  - pytest-cov>=3.0 ; extra == 'test'
+  - pytest-randomly>=3.5 ; extra == 'test'
+  requires_python: '>=3.10'
 - conda: https://conda.anaconda.org/conda-forge/linux-64/pthread-stubs-0.4-hb9d3cd8_1002.conda
   sha256: 9c88f8c64590e9567c6c80823f0328e58d3b1efb0e1c539c0315ceca764e0973
   md5: b3c17d95b5a10c6e64a21fa17573e70e

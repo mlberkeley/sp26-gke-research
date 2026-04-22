@@ -47,6 +47,7 @@ grpcio = "*"
 
 [feature.py_agent.pypi-dependencies]
 langgraph = "*"
+langgraph-checkpoint-postgres = "*"
 langchain-google-genai = "*"
 google-genai = "*"
 httpx = "*"
