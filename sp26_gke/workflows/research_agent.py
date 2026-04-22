@@ -6,13 +6,17 @@ Based on: https://towardsdatascience.com/langgraph-101-lets-build-a-deep-researc
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import operator
 import os
 import re
 import sys
 import threading
+import time
 import uuid
+from collections.abc import Callable
+from contextlib import nullcontext
 from datetime import datetime
 from typing import Annotated, Any, TypedDict
 
@@ -22,10 +26,21 @@ from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
+from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Send
 from pydantic import BaseModel, Field, field_validator
+
+try:
+    from langgraph.checkpoint.postgres import (  # type: ignore[import-not-found]
+        PostgresSaver as _PostgresSaver,
+    )
+except ImportError:
+    _PostgresSaver = None
+
+PostgresSaver: Any | None = _PostgresSaver
 
 load_dotenv()
 
@@ -39,6 +54,9 @@ class Configuration(BaseModel):
     number_of_initial_queries: int = Field(default=1)
     max_research_loops: int = Field(default=1)
     max_citations_per_search: int = Field(default=5)
+    max_queries_per_run: int = Field(default=4)
+    provider_retry_attempts: int = Field(default=3)
+    provider_retry_backoff_seconds: float = Field(default=2.0)
 
     @classmethod
     def from_runnable_config(
@@ -502,6 +520,23 @@ def _make_llm(model: str) -> ChatGoogleGenerativeAI:
     )
 
 
+def _invoke_with_provider_backoff[T](
+    fn: Callable[[], T], *, attempts: int, backoff_seconds: float
+) -> T:
+    """Retry transient provider capacity failures with linear backoff."""
+    bounded_attempts = max(1, attempts)
+    bounded_backoff = max(0.1, backoff_seconds)
+    for attempt in range(1, bounded_attempts + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            is_capacity_error = "503" in str(exc) or "UNAVAILABLE" in str(exc)
+            if not is_capacity_error or attempt >= bounded_attempts:
+                raise
+            time.sleep(bounded_backoff * attempt)
+    raise RuntimeError("Provider backoff failed unexpectedly")
+
+
 def _plan_to_brief(plan: ResearchPlan) -> str:
     lines = [
         "Research plan:",
@@ -575,6 +610,7 @@ def plan_research(state: OverallState, config: RunnableConfig) -> OverallState:
 def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerationState:
     cfg = Configuration.from_runnable_config(config)
     count = state.get("initial_search_query_count") or cfg.number_of_initial_queries
+    max_queries_per_run = max(1, cfg.max_queries_per_run)
 
     llm = _make_llm(cfg.query_generator_model)
     plan_obj = state.get("plan")
@@ -591,7 +627,7 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
         return {
             "query_list": [
                 {"search_query": q, "section_id": "unplanned"}
-                for q in result.query  # type: ignore[union-attr]
+                for q in result.query[:count][:max_queries_per_run]  # type: ignore[union-attr]
             ]
         }
 
@@ -610,9 +646,9 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
                 number_queries=count,
             )
         )
-        for query in result.query:  # type: ignore[union-attr]
+        for query in result.query[:count]:  # type: ignore[union-attr]
             query_list.append({"search_query": query, "section_id": section.id})
-    return {"query_list": query_list}
+    return {"query_list": query_list[:max_queries_per_run]}
 
 
 def continue_to_web_research(state: QueryGenerationState) -> list[Send]:
@@ -640,13 +676,17 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
 
     citation_base = search_id * cfg.max_citations_per_search
     client = _get_genai_client()
-    response = client.models.generate_content(
-        model=cfg.query_generator_model,
-        contents=WEB_SEARCHER_PROMPT.format(
-            current_date=_current_date(),
-            research_topic=state["search_query"],
+    response = _invoke_with_provider_backoff(
+        lambda: client.models.generate_content(
+            model=cfg.query_generator_model,
+            contents=WEB_SEARCHER_PROMPT.format(
+                current_date=_current_date(),
+                research_topic=state["search_query"],
+            ),
+            config={"tools": [{"google_search": {}}], "temperature": 0},
         ),
-        config={"tools": [{"google_search": {}}], "temperature": 0},
+        attempts=cfg.provider_retry_attempts,
+        backoff_seconds=cfg.provider_retry_backoff_seconds,
     )
 
     marker_sources, text_with_citations = _extract_sources(
@@ -709,12 +749,16 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     model = state.get("reasoning_model") or cfg.reflection_model
 
     llm = _make_llm(model)
-    result = llm.with_structured_output(Reflection).invoke(
-        REFLECTION_PROMPT.format(
-            current_date=_current_date(),
-            research_topic=_get_research_topic(state["messages"]),
-            summaries="\n\n---\n\n".join(state["web_research_result"]),
-        )
+    result = _invoke_with_provider_backoff(
+        lambda: llm.with_structured_output(Reflection).invoke(
+            REFLECTION_PROMPT.format(
+                current_date=_current_date(),
+                research_topic=_get_research_topic(state["messages"]),
+                summaries="\n\n---\n\n".join(state["web_research_result"]),
+            )
+        ),
+        attempts=cfg.provider_retry_attempts,
+        backoff_seconds=cfg.provider_retry_backoff_seconds,
     )
     return {
         "is_sufficient": result.is_sufficient,  # type: ignore[union-attr]
@@ -803,45 +847,97 @@ def finalize_answer(state: OverallState, config: RunnableConfig) -> OverallState
 
 # ── Build graph ──────────────────────────────────────────────────────────────
 
-builder = StateGraph(OverallState, config_schema=Configuration)  # type: ignore[call-arg]
-builder.add_node("plan_research", plan_research)
-builder.add_node("generate_query", generate_query)
-builder.add_node("web_research", web_research)
-builder.add_node("reflection", reflection)
-builder.add_node("finalize_answer", finalize_answer)
-builder.add_edge(START, "plan_research")
-builder.add_edge("plan_research", "generate_query")
-builder.add_conditional_edges(
-    "generate_query", continue_to_web_research, ["web_research"]
-)
-builder.add_edge("web_research", "reflection")
-builder.add_conditional_edges(
-    "reflection", evaluate_research, ["web_research", "finalize_answer"]
-)
-builder.add_edge("finalize_answer", END)
-graph = builder.compile(name="pro-search-agent")
+
+def _build_graph_builder() -> StateGraph:
+    builder = StateGraph(OverallState, config_schema=Configuration)  # type: ignore[call-arg]
+    builder.add_node("plan_research", plan_research)
+    builder.add_node("generate_query", generate_query)
+    builder.add_node("web_research", web_research)
+    builder.add_node("reflection", reflection)
+    builder.add_node("finalize_answer", finalize_answer)
+    builder.add_edge(START, "plan_research")
+    builder.add_edge("plan_research", "generate_query")
+    builder.add_conditional_edges(
+        "generate_query", continue_to_web_research, ["web_research"]
+    )
+    builder.add_edge("web_research", "reflection")
+    builder.add_conditional_edges(
+        "reflection", evaluate_research, ["web_research", "finalize_answer"]
+    )
+    builder.add_edge("finalize_answer", END)
+    return builder
+
+
+def _graph_checkpointer_context(persist: bool):
+    """Yield a checkpointer context suited for current runtime mode."""
+    if persist and PostgresSaver is not None and os.getenv("DATABASE_URL"):
+        return PostgresSaver.from_conn_string(os.environ["DATABASE_URL"])
+    return nullcontext(InMemorySaver())
+
+
+def _compile_graph_with_checkpointer(checkpointer: Any) -> CompiledStateGraph:
+    return _build_graph_builder().compile(
+        name="pro-search-agent", checkpointer=checkpointer
+    )
+
+
+graph = _build_graph_builder().compile(name="pro-search-agent")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 
 def run() -> int:
-    if len(sys.argv) < 2:
+    parser = argparse.ArgumentParser(
+        prog="python -m sp26_gke.workflows.research_agent",
+        description="Run or resume the deep research agent.",
+    )
+    parser.add_argument("question", nargs="*", help="Research question for a new run.")
+    parser.add_argument(
+        "--resume-run-id",
+        dest="resume_run_id",
+        help="Resume an existing run by run_id/thread_id.",
+    )
+    args = parser.parse_args()
+    question = " ".join(args.question).strip()
+
+    is_resume = bool(args.resume_run_id)
+    if not is_resume and not question:
         print('Usage: python -m sp26_gke.workflows.research_agent "Your question"')
+        print(
+            "Or:    python -m sp26_gke.workflows.research_agent --resume-run-id <run_id>"
+        )
         return 1
 
-    question = " ".join(sys.argv[1:])
-    run_id = str(uuid.uuid4())
+    run_id = args.resume_run_id or str(uuid.uuid4())
+    thread_id = run_id
     persist = bool(os.getenv("DATABASE_URL"))
+    if is_resume and not persist:
+        print("Resume requires DATABASE_URL for durable checkpoints.", file=sys.stderr)
+        return 1
+    if is_resume and PostgresSaver is None:
+        print(
+            "Resume requires langgraph-checkpoint-postgres. Install it and retry.",
+            file=sys.stderr,
+        )
+        return 1
 
+    db: Any | None = None
     if persist:
         from sp26_gke.workflows.research_db import ResearchDB
 
         db = ResearchDB()
-        asyncio.run(db.create_run(run_id, question))
-        print(f"run_id={run_id}  (persisting to CloudSQL)")
+        topic = question or f"resume:{run_id}"
+        asyncio.run(db.create_run(run_id, topic, thread_id=thread_id))
+        mode = "resume" if is_resume else "start"
+        print(f"mode={mode} run_id={run_id}  (persisting to CloudSQL)")
+        asyncio.run(db.log_event(run_id, event_type=f"run_{mode}"))
+    elif is_resume:
+        print("Resume requires persistence enabled.", file=sys.stderr)
+        return 1
 
-    print(f"\nResearching: {question}\n")
+    if question:
+        print(f"\nResearching: {question}\n")
 
     inputs: dict[str, Any] = {
         "messages": [HumanMessage(content=question)],
@@ -860,6 +956,7 @@ def run() -> int:
         "max_research_loops": 0,
         "reasoning_model": "",
     }
+    graph_input: dict[str, Any] | None = None if is_resume else inputs
 
     def _trim(text: str, max_len: int = 160) -> str:
         s = " ".join(text.split())
@@ -956,52 +1053,87 @@ def run() -> int:
 
     last_values: dict[str, Any] | None = None
 
-    # Stream both per-node updates (for progress) and full values (for final output).
-    graph_runner: Any = graph
-    config: dict[str, Any] = {"configurable": {"run_id": run_id}}
+    config: dict[str, Any] = {
+        "configurable": {"run_id": run_id, "thread_id": thread_id}
+    }
     try:
-        stream_iter = graph_runner.stream(
-            inputs,
-            config=config,
-            stream_mode=["updates", "values"],
-        )
-        for mode, chunk in stream_iter:
-            if mode == "updates" and isinstance(chunk, dict):
-                for node, update in chunk.items():
-                    if isinstance(update, dict):
-                        _print_progress_from_update(str(node), update)
-                    else:
-                        print(f"→ {node}", flush=True)
-            elif mode == "values" and isinstance(chunk, dict):
-                last_values = chunk
-                query_counts = _section_counts(chunk, "section_queries")
-                evidence_counts = _section_counts(chunk, "section_results")
-                if query_counts or evidence_counts:
-                    print("  section progress:", flush=True)
-                    section_ids = sorted(set(query_counts) | set(evidence_counts))
-                    for section_id in section_ids:
-                        q_count = query_counts.get(section_id, 0)
-                        e_count = evidence_counts.get(section_id, 0)
-                        print(
-                            f"  - {section_id}: queries={q_count} evidence={e_count}",
-                            flush=True,
-                        )
-    except Exception:
-        # Fallback to updates-only streaming (older LangGraph versions), and use invoke for
-        # final output if we can't capture final values.
-        last_values = None
-        for chunk in graph_runner.stream(inputs, config=config, stream_mode="updates"):
-            if not isinstance(chunk, dict):
-                continue
-            for node, update in chunk.items():
-                if isinstance(update, dict):
-                    _print_progress_from_update(str(node), update)
-                else:
-                    print(f"→ {node}", flush=True)
+        with _graph_checkpointer_context(persist) as checkpointer:
+            if persist and hasattr(checkpointer, "setup"):
+                checkpointer.setup()
+            graph_runner: Any = _compile_graph_with_checkpointer(checkpointer)
 
-    if last_values is None:
-        # If we couldn't capture final state via streaming, do a normal run to get it.
-        last_values = graph_runner.invoke(inputs, config=config)
+            stream_iter = graph_runner.stream(
+                graph_input,
+                config=config,
+                stream_mode=["updates", "values"],
+            )
+            for mode, chunk in stream_iter:
+                if mode == "updates" and isinstance(chunk, dict):
+                    for node, update in chunk.items():
+                        node_name = str(node)
+                        if isinstance(update, dict):
+                            _print_progress_from_update(node_name, update)
+                        else:
+                            print(f"→ {node_name}", flush=True)
+                        if db is not None:
+                            checkpoint_id = f"{run_id}:{node_name}:{time.time_ns()}"
+                            asyncio.run(
+                                db.mark_run_status(
+                                    run_id,
+                                    status="running",
+                                    current_node=node_name,
+                                    last_checkpoint_id=checkpoint_id,
+                                )
+                            )
+                            asyncio.run(
+                                db.upsert_checkpoint_meta(
+                                    run_id,
+                                    checkpoint_id=checkpoint_id,
+                                    node_name=node_name,
+                                    attempt=1,
+                                )
+                            )
+                            asyncio.run(
+                                db.log_event(
+                                    run_id,
+                                    event_type="node_progress",
+                                    node_name=node_name,
+                                )
+                            )
+                elif mode == "values" and isinstance(chunk, dict):
+                    last_values = chunk
+                    query_counts = _section_counts(chunk, "section_queries")
+                    evidence_counts = _section_counts(chunk, "section_results")
+                    if query_counts or evidence_counts:
+                        print("  section progress:", flush=True)
+                        section_ids = sorted(set(query_counts) | set(evidence_counts))
+                        for section_id in section_ids:
+                            q_count = query_counts.get(section_id, 0)
+                            e_count = evidence_counts.get(section_id, 0)
+                            print(
+                                f"  - {section_id}: queries={q_count} evidence={e_count}",
+                                flush=True,
+                            )
+
+            if last_values is None:
+                last_values = graph_runner.invoke(graph_input, config=config)
+    except Exception as exc:
+        if db is not None:
+            asyncio.run(
+                db.mark_run_status(
+                    run_id,
+                    status="failed",
+                    last_error=str(exc),
+                )
+            )
+            asyncio.run(
+                db.log_event(
+                    run_id,
+                    event_type="run_failed",
+                    payload={"error": str(exc)},
+                )
+            )
+        raise
 
     messages = last_values.get("messages", [])
     if messages:
@@ -1016,7 +1148,10 @@ def run() -> int:
             print(f"[{label}] {s.get('title', 'No title')}\n    {s.get('url', '')}")
 
     if persist:
+        if db is None:
+            raise RuntimeError("Persistence is enabled but ResearchDB is unavailable.")
         asyncio.run(db.complete_run(run_id))
+        asyncio.run(db.log_event(run_id, event_type="run_completed"))
         print(f"\n✓ Run {run_id} persisted to CloudSQL.")
 
     return 0

@@ -6,19 +6,22 @@ Run with: pixi run demo
 
 from __future__ import annotations
 
+import asyncio
+import os
+import time
 import uuid
 from typing import Any
 
 import streamlit as st
 from langchain_core.messages import HumanMessage
 
-from sp26_gke.workflows.research_agent import graph as _graph
+from sp26_gke.workflows.research_agent import (
+    _compile_graph_with_checkpointer,
+    _graph_checkpointer_context,
+)
 
 st.set_page_config(page_title="Deep Research Agent", layout="wide")
 st.title("Deep Research Agent")
-
-# Cast to Any so mypy doesn't complain about stream/invoke overload signatures.
-graph_runner: Any = _graph
 
 
 def _trim(text: str, max_len: int = 160) -> str:
@@ -33,6 +36,8 @@ run_button = st.button("Run", type="primary")
 
 if run_button and topic:
     run_id = str(uuid.uuid4())
+    persist = bool(os.getenv("DATABASE_URL"))
+    db: Any | None = None
 
     inputs: dict[str, Any] = {
         "messages": [HumanMessage(content=topic)],
@@ -51,110 +56,163 @@ if run_button and topic:
         "max_research_loops": 0,
         "reasoning_model": "",
     }
-    config: dict[str, Any] = {"configurable": {"run_id": run_id}}
+    config: dict[str, Any] = {"configurable": {"run_id": run_id, "thread_id": run_id}}
 
     progress_container = st.container()
     report_placeholder = st.empty()
     sources_placeholder = st.empty()
     evidence_placeholder = st.empty()
+    db_placeholder = st.empty()
+    checkpoints_placeholder = st.empty()
 
     last_values: dict[str, Any] | None = None
+
+    if persist:
+        from sp26_gke.workflows.research_db import ResearchDB
+
+        db = ResearchDB()
+        asyncio.run(db.create_run(run_id, topic, thread_id=run_id))
+        asyncio.run(db.log_event(run_id, event_type="run_start"))
 
     with progress_container:
         status = st.status("Researching...", expanded=True)
 
-        try:
-            stream_iter = graph_runner.stream(
-                inputs,
-                config=config,
-                stream_mode=["updates", "values"],
-            )
-            for mode, chunk in stream_iter:
-                if mode == "updates" and isinstance(chunk, dict):
-                    for node, update in chunk.items():
-                        if not isinstance(update, dict):
-                            status.write(f"→ {node}")
-                            continue
+        with _graph_checkpointer_context(
+            persist=bool(os.getenv("DATABASE_URL"))
+        ) as saver:
+            if os.getenv("DATABASE_URL") and hasattr(saver, "setup"):
+                saver.setup()
+            graph_runner: Any = _compile_graph_with_checkpointer(saver)
+            try:
+                stream_iter = graph_runner.stream(
+                    inputs,
+                    config=config,
+                    stream_mode=["updates", "values"],
+                )
+                for mode, chunk in stream_iter:
+                    if mode == "updates" and isinstance(chunk, dict):
+                        for node, update in chunk.items():
+                            node_name = str(node)
+                            if not isinstance(update, dict):
+                                status.write(f"→ {node_name}")
+                                continue
 
-                        if node == "plan_research":
-                            section_order = update.get("section_order")
-                            if isinstance(section_order, list) and section_order:
-                                line = f"→ plan_research: planned {len(section_order)} sections"
-                                status.write(line)
-                                for i, sid in enumerate(section_order, 1):
-                                    status.write(f"  - [{i}] {sid}")
+                            if node_name == "plan_research":
+                                section_order = update.get("section_order")
+                                if isinstance(section_order, list) and section_order:
+                                    line = f"→ plan_research: planned {len(section_order)} sections"
+                                    status.write(line)
+                                    for i, sid in enumerate(section_order, 1):
+                                        status.write(f"  - [{i}] {sid}")
+                                else:
+                                    status.write("→ plan_research")
+
+                            elif node_name == "generate_query":
+                                queries = update.get("query_list")
+                                if isinstance(queries, list):
+                                    line = f"→ generate_query: generated {len(queries)} queries"
+                                    status.write(line)
+                                    by_section: dict[str, int] = {}
+                                    for item in queries:
+                                        if isinstance(item, dict):
+                                            sid = str(
+                                                item.get("section_id", "unplanned")
+                                            )
+                                            by_section[sid] = by_section.get(sid, 0) + 1
+                                    for sid, count in sorted(by_section.items()):
+                                        status.write(f"  - {sid}: {count} queries")
+                                else:
+                                    status.write("→ generate_query")
+
+                            elif node_name == "web_research":
+                                section_results = update.get("section_results")
+                                if (
+                                    isinstance(section_results, dict)
+                                    and section_results
+                                ):
+                                    sid = next(iter(section_results.keys()))
+                                    status.write(f"→ web_research: section={sid}")
+                                q = update.get("search_query")
+                                if isinstance(q, list) and q:
+                                    status.write(f'  searching "{q[-1]}"')
+                                marker_sources = update.get("marker_sources")
+                                if isinstance(marker_sources, dict):
+                                    status.write(
+                                        f"  extracted {len(marker_sources)} citation markers"
+                                    )
+
+                            elif node_name == "reflection":
+                                is_sufficient = update.get("is_sufficient")
+                                loop = update.get("research_loop_count")
+                                gap = update.get("knowledge_gap")
+                                gap_txt = _trim(str(gap)) if gap else ""
+                                parts: list[str] = []
+                                if is_sufficient is not None:
+                                    parts.append(
+                                        f"sufficient={str(is_sufficient).lower()}"
+                                    )
+                                if loop is not None:
+                                    parts.append(f"loop={loop}")
+                                header = "→ reflection" + (
+                                    ": " + " ".join(parts) if parts else ""
+                                )
+                                status.write(header)
+                                if gap_txt:
+                                    status.write(f'  gap="{gap_txt}"')
+
+                            elif node_name == "finalize_answer":
+                                status.write("→ Generating final report...")
+
                             else:
-                                status.write("→ plan_research")
+                                status.write(f"→ {node_name}")
 
-                        elif node == "generate_query":
-                            queries = update.get("query_list")
-                            if isinstance(queries, list):
-                                line = f"→ generate_query: generated {len(queries)} queries"
-                                status.write(line)
-                                by_section: dict[str, int] = {}
-                                for item in queries:
-                                    if isinstance(item, dict):
-                                        sid = str(item.get("section_id", "unplanned"))
-                                        by_section[sid] = by_section.get(sid, 0) + 1
-                                for sid, count in sorted(by_section.items()):
-                                    status.write(f"  - {sid}: {count} queries")
-                            else:
-                                status.write("→ generate_query")
-
-                        elif node == "web_research":
-                            section_results = update.get("section_results")
-                            if isinstance(section_results, dict) and section_results:
-                                sid = next(iter(section_results.keys()))
-                                status.write(f"→ web_research: section={sid}")
-                            q = update.get("search_query")
-                            if isinstance(q, list) and q:
-                                status.write(f'  searching "{q[-1]}"')
-                            marker_sources = update.get("marker_sources")
-                            if isinstance(marker_sources, dict):
-                                status.write(
-                                    f"  extracted {len(marker_sources)} citation markers"
+                            if db is not None:
+                                checkpoint_id = f"{run_id}:{node_name}:{time.time_ns()}"
+                                asyncio.run(
+                                    db.mark_run_status(
+                                        run_id,
+                                        status="running",
+                                        current_node=node_name,
+                                        last_checkpoint_id=checkpoint_id,
+                                    )
+                                )
+                                asyncio.run(
+                                    db.upsert_checkpoint_meta(
+                                        run_id,
+                                        checkpoint_id=checkpoint_id,
+                                        node_name=node_name,
+                                        attempt=1,
+                                    )
+                                )
+                                asyncio.run(
+                                    db.log_event(
+                                        run_id,
+                                        event_type="node_progress",
+                                        node_name=node_name,
+                                    )
                                 )
 
-                        elif node == "reflection":
-                            is_sufficient = update.get("is_sufficient")
-                            loop = update.get("research_loop_count")
-                            gap = update.get("knowledge_gap")
-                            gap_txt = _trim(str(gap)) if gap else ""
-                            parts: list[str] = []
-                            if is_sufficient is not None:
-                                parts.append(f"sufficient={str(is_sufficient).lower()}")
-                            if loop is not None:
-                                parts.append(f"loop={loop}")
-                            header = "→ reflection" + (
-                                ": " + " ".join(parts) if parts else ""
-                            )
-                            status.write(header)
-                            if gap_txt:
-                                status.write(f'  gap="{gap_txt}"')
+                    elif mode == "values" and isinstance(chunk, dict):
+                        last_values = chunk
 
-                        elif node == "finalize_answer":
-                            status.write("→ Generating final report...")
+            except Exception:
+                last_values = None
+                for chunk in graph_runner.stream(
+                    inputs, config=config, stream_mode="updates"
+                ):
+                    if not isinstance(chunk, dict):
+                        continue
+                    for node, _update in chunk.items():
+                        status.write(f"→ {node}")
 
-                        else:
-                            status.write(f"→ {node}")
-
-                elif mode == "values" and isinstance(chunk, dict):
-                    last_values = chunk
-
-        except Exception:
-            last_values = None
-            for chunk in graph_runner.stream(
-                inputs, config=config, stream_mode="updates"
-            ):
-                if not isinstance(chunk, dict):
-                    continue
-                for node, _update in chunk.items():
-                    status.write(f"→ {node}")
-
-        if last_values is None:
-            last_values = graph_runner.invoke(inputs, config=config)
+            if last_values is None:
+                last_values = graph_runner.invoke(inputs, config=config)
 
         status.update(label="Research complete", state="complete", expanded=False)
+
+    if db is not None:
+        asyncio.run(db.complete_run(run_id))
+        asyncio.run(db.log_event(run_id, event_type="run_completed"))
 
     messages = last_values.get("messages", [])
     if messages:
@@ -183,3 +241,41 @@ if run_button and topic:
                         claim = ev.get("claim", "")
                         url = ev.get("source_url", "")
                         st.markdown(f"- {claim}  \n  [source]({url})")
+
+    if persist:
+        try:
+            summary = (
+                asyncio.run(db.get_run_persistence_summary(run_id))
+                if db is not None
+                else {}
+            )
+            with db_placeholder.container():
+                st.subheader("DB Persistence Verification")
+                run_info = summary.get("run") or {}
+                st.write(f"run_id: `{run_id}`")
+                st.write(f"status: `{run_info.get('status', 'unknown')}`")
+                st.write(f"thread_id: `{run_info.get('thread_id', 'n/a')}`")
+                st.write(
+                    f"evidence_rows: `{summary.get('evidence_count', 0)}` | "
+                    f"event_rows: `{summary.get('event_count', 0)}`"
+                )
+            if db is not None:
+                checkpoints = asyncio.run(
+                    db.get_run_checkpoint_timeline(run_id, limit=30)
+                )
+                with checkpoints_placeholder.container():
+                    st.subheader("Checkpoint Timeline")
+                    if not checkpoints:
+                        st.caption("No checkpoint rows found for this run yet.")
+                    else:
+                        for row in checkpoints:
+                            node = row.get("node_name") or "(unknown)"
+                            checkpoint_id = row.get("checkpoint_id", "")
+                            created_at = row.get("created_at")
+                            st.markdown(
+                                f"- `{created_at}` | `{node}` | `{checkpoint_id}`"
+                            )
+        except Exception as exc:
+            with db_placeholder.container():
+                st.subheader("DB Persistence Verification")
+                st.warning(f"Could not read DB summary: {exc}")
