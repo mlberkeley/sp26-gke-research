@@ -133,6 +133,7 @@ if run_button and topic:
         "search_query": [],
         "web_research_result": [],
         "marker_sources": {},
+        "evidence_extraction_events": [],
         "sources_gathered": [],
         "research_loop_count": 0,
         "initial_search_query_count": 0,
@@ -224,6 +225,12 @@ if run_button and topic:
                                     status.write(
                                         f"  extracted {len(marker_sources)} citation markers"
                                     )
+                                extraction_events = update.get(
+                                    "evidence_extraction_events"
+                                )
+                                if isinstance(extraction_events, list):
+                                    for event in extraction_events:
+                                        status.write(f"  {event}")
 
                             elif node_name == "reflection":
                                 is_sufficient = update.get("is_sufficient")

@@ -145,6 +145,7 @@ class OverallState(TypedDict):
     search_query: Annotated[list, operator.add]
     web_research_result: Annotated[list, operator.add]
     marker_sources: Annotated[dict[int, list[dict[str, str]]], merge_marker_sources]
+    evidence_extraction_events: Annotated[list[str], operator.add]
     sources_gathered: Annotated[list, operator.add]
     initial_search_query_count: int
     max_research_loops: int
@@ -736,15 +737,22 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     marker_url_mapping = "\n".join(marker_lines) or "(no citation markers found)"
 
     evidence_items: list[dict] = []
+    extraction_event = (
+        f"section={state['section_id']}: evidence extraction returned 0 items"
+    )
     try:
         llm = _make_llm(cfg.query_generator_model)
-        ev_result = llm.with_structured_output(EvidenceList).invoke(
-            EVIDENCE_EXTRACTION_PROMPT.format(
-                section_id=state["section_id"],
-                search_query=state["search_query"],
-                marker_url_mapping=marker_url_mapping,
-                text=text_with_citations,
-            )
+        ev_result = _invoke_with_provider_backoff(
+            lambda: llm.with_structured_output(EvidenceList).invoke(
+                EVIDENCE_EXTRACTION_PROMPT.format(
+                    section_id=state["section_id"],
+                    search_query=state["search_query"],
+                    marker_url_mapping=marker_url_mapping,
+                    text=text_with_citations,
+                )
+            ),
+            attempts=cfg.provider_retry_attempts,
+            backoff_seconds=cfg.provider_retry_backoff_seconds,
         )
         if ev_result and hasattr(ev_result, "items") and ev_result.items:
             for item in ev_result.items:  # type: ignore[union-attr]
@@ -756,8 +764,11 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
                 item.source_quality_tier = quality.tier
                 item.source_quality_reason = quality.reason
                 evidence_items.append(item.model_dump())
+        extraction_event = f"section={state['section_id']}: extracted {len(evidence_items)} evidence items"
     except Exception:
-        pass
+        extraction_event = (
+            f"section={state['section_id']}: evidence extraction failed after retries"
+        )
 
     run_id = config.get("configurable", {}).get("run_id")
     if run_id and evidence_items and os.getenv("DATABASE_URL"):
@@ -774,6 +785,7 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
         "marker_sources": marker_sources,
         "search_query": [state["search_query"]],
         "web_research_result": [text_with_citations],
+        "evidence_extraction_events": [extraction_event],
         "section_results": {state["section_id"]: [text_with_citations]},
         "section_evidence": {state["section_id"]: evidence_items},
         "section_queries": {state["section_id"]: [state["search_query"]]},
@@ -988,6 +1000,7 @@ def run() -> int:
         "search_query": [],
         "web_research_result": [],
         "marker_sources": {},
+        "evidence_extraction_events": [],
         "sources_gathered": [],
         "research_loop_count": 0,
         "initial_search_query_count": 0,
