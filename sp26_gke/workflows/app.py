@@ -137,6 +137,8 @@ if run_button and topic:
         "marker_sources": {},
         "evidence_extraction_events": [],
         "quality_gate_events": [],
+        "paragraph_evidence_mappings": [],
+        "unsupported_paragraphs": [],
         "sources_gathered": [],
         "research_loop_count": 0,
         "initial_search_query_count": 0,
@@ -377,6 +379,13 @@ if run_button and topic:
                         st.markdown(
                             f"- `[{tier} {score:.2f}]` {claim}  \n  [source]({url})"
                         )
+
+    unsupported_paragraphs: list[dict[str, str]] = last_values.get(
+        "unsupported_paragraphs", []
+    )
+    if unsupported_paragraphs:
+        with evidence_placeholder.container():
+            st.caption(f"Unsupported paragraphs flagged: {len(unsupported_paragraphs)}")
 
     if node_latest_state:
         with node_states_placeholder.container():
