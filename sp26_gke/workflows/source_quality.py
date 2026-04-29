@@ -1,9 +1,9 @@
 """
 Domain-based source-quality scoring for research evidence.
 
-Soft-scores every evidence URL into a tier (authoritative/reputable/neutral/low) and
-hard-blocks invalid URLs and domains on an explicit blocklist. Scoring is deterministic
-and depends only on the registered domain and TLD.
+Soft-scores every evidence URL into a tier (reputable/neutral/low) and hard-blocks
+invalid URLs and domains on an explicit blocklist. Scoring is deterministic and depends
+only on the registered domain and TLD.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 # Accept only the characters legally allowed in DNS hostnames or IP literals.
 _VALID_HOST_RE = re.compile(r"^[a-z0-9.\-:\[\]]+$")
 
-# Authoritative top-level domains
+# Trusted top-level domains treated as reputable
 AUTHORITATIVE_TLDS: frozenset[str] = frozenset({"gov", "edu", "mil", "int"})
 
 # academic/government suffixes (e.g. cam.ac.uk, nih.go.jp).
@@ -183,7 +183,7 @@ def score_url(url: str) -> SourceQuality:
     """
     Score a URL into a quality tier using domain-policy precedence.
 
-    Precedence: invalid -> blocklist -> allowlist -> authoritative TLD ->
+    Precedence: invalid -> blocklist -> allowlist -> trusted TLD ->
     low-quality domain -> neutral default. Output is deterministic for a given
     URL and policy.
     """
@@ -200,13 +200,13 @@ def score_url(url: str) -> SourceQuality:
 
     if domain in ALLOWLIST_DOMAINS:
         return SourceQuality(
-            score=1.0, tier="authoritative", reason="allowlist", blocked=False
+            score=1.0, tier="reputable", reason="allowlist", blocked=False
         )
 
     if _domain_has_authoritative_suffix(domain):
         return SourceQuality(
-            score=1.0,
-            tier="authoritative",
+            score=0.9,
+            tier="reputable",
             reason="authoritative_tld",
             blocked=False,
         )
