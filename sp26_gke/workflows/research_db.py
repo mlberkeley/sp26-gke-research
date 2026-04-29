@@ -45,6 +45,10 @@ CREATE TABLE IF NOT EXISTS evidence (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
+ALTER TABLE evidence ADD COLUMN IF NOT EXISTS source_quality_score REAL;
+ALTER TABLE evidence ADD COLUMN IF NOT EXISTS source_quality_tier TEXT;
+ALTER TABLE evidence ADD COLUMN IF NOT EXISTS source_quality_reason TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_evidence_run_section
   ON evidence(run_id, section_id);
 
@@ -262,13 +266,17 @@ class ResearchDB:
                     item.source_url,
                     item.retrieval_query,
                     _claim_hash(item.claim, item.source_url),
+                    item.source_quality_score,
+                    item.source_quality_tier,
+                    item.source_quality_reason,
                 )
                 for item in items
             ]
             await conn.executemany(
                 "INSERT INTO evidence "
-                "(run_id, section_id, claim, source_url, retrieval_query, claim_hash) "
-                "VALUES ($1, $2, $3, $4, $5, $6) "
+                "(run_id, section_id, claim, source_url, retrieval_query, claim_hash, "
+                "source_quality_score, source_quality_tier, source_quality_reason) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) "
                 "ON CONFLICT (run_id, section_id, claim_hash) DO NOTHING",
                 rows,
             )

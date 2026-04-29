@@ -33,6 +33,8 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Send
 from pydantic import BaseModel, Field, field_validator
 
+from sp26_gke.workflows.source_quality import score_url
+
 try:
     from langgraph.checkpoint.postgres import (  # type: ignore[import-not-found]
         PostgresSaver as _PostgresSaver,
@@ -52,11 +54,15 @@ class Configuration(BaseModel):
     reflection_model: str = Field(default="gemini-2.5-flash")
     answer_model: str = Field(default="gemini-2.5-flash")
     number_of_initial_queries: int = Field(default=1)
-    max_research_loops: int = Field(default=1)
+    max_research_loops: int = Field(default=2)
     max_citations_per_search: int = Field(default=5)
-    max_queries_per_run: int = Field(default=4)
-    provider_retry_attempts: int = Field(default=3)
-    provider_retry_backoff_seconds: float = Field(default=2.0)
+    max_queries_per_run: int = Field(default=7)
+    allowed_evidence_tiers: str = Field(default="reputable,neutral")
+    min_allowed_evidence_total: int = Field(default=5)
+    min_allowed_evidence_per_section: int = Field(default=1)
+    min_reputable_evidence_total: int = Field(default=1)
+    provider_retry_attempts: int = Field(default=2)
+    provider_retry_backoff_seconds: float = Field(default=3.0)
 
     @classmethod
     def from_runnable_config(
@@ -135,6 +141,8 @@ class OverallState(TypedDict):
     section_order: list[str]
     section_results: Annotated[dict[str, list[str]], merge_section_lists]
     section_evidence: Annotated[dict[str, list[dict]], merge_section_lists]
+    section_allowed_results: Annotated[dict[str, list[str]], merge_section_lists]
+    section_allowed_evidence: Annotated[dict[str, list[dict]], merge_section_lists]
     section_queries: Annotated[dict[str, list[str]], merge_section_lists]
     section_marker_sources: Annotated[
         dict[str, dict[int, list[dict[str, str]]]],
@@ -143,6 +151,8 @@ class OverallState(TypedDict):
     search_query: Annotated[list, operator.add]
     web_research_result: Annotated[list, operator.add]
     marker_sources: Annotated[dict[int, list[dict[str, str]]], merge_marker_sources]
+    evidence_extraction_events: Annotated[list[str], operator.add]
+    quality_gate_events: Annotated[list[str], operator.add]
     sources_gathered: Annotated[list, operator.add]
     initial_search_query_count: int
     max_research_loops: int
@@ -158,6 +168,11 @@ class ReflectionState(TypedDict):
     is_sufficient: bool
     knowledge_gap: str
     follow_up_queries: Annotated[list, operator.add]
+    quality_gate_met: bool
+    quality_gap_sections: list[str]
+    quality_gap: str
+    reputable_count: int
+    reputable_shortfall: int
     research_loop_count: int
     number_of_ran_queries: int
 
@@ -197,6 +212,18 @@ class Evidence(BaseModel):
     source_url: str = Field(description="The URL this claim came from")
     retrieval_query: str = Field(
         description="The search query that surfaced this source"
+    )
+    source_quality_score: float = Field(
+        default=0.5,
+        description="Domain-policy quality score in [0, 1]; populated post-extraction.",
+    )
+    source_quality_tier: str = Field(
+        default="neutral",
+        description="Quality tier label (reputable/neutral/low/blocked).",
+    )
+    source_quality_reason: str = Field(
+        default="default",
+        description="Reason the tier was assigned (allowlist/authoritative_tld/etc).",
     )
 
     @field_validator("claim")
@@ -288,6 +315,11 @@ Topic: {research_topic}
 Rules:
 - Prefer a single query unless the topic has multiple distinct aspects
 - Queries must be specific and likely to return current, authoritative results
+- Prefer institutional and primary sources by adding domain constraints where relevant
+  (e.g. site:.gov, site:.edu, site:who.int, site:oecd.org, site:worldbank.org,
+  site:un.org, site:europa.eu, or topic-specific standards bodies/journals)
+- Avoid entertainment/video-first domains unless explicitly required by the topic
+  (especially avoid youtube.com and youtu.be)
 - No duplicate or near-duplicate queries
 
 Respond as JSON with keys "rationale" (string) and "query" (list of strings)."""
@@ -304,6 +336,11 @@ Section key questions:
 Rules:
 - Focus only on this section's scope.
 - Queries must be specific and likely to return current, authoritative results.
+- Prefer institutional and primary sources by adding domain constraints where relevant
+  (e.g. site:.gov, site:.edu, site:who.int, site:oecd.org, site:worldbank.org,
+  site:un.org, site:europa.eu, or topic-specific standards bodies/journals).
+- Avoid entertainment/video-first domains unless explicitly required by the topic
+  (especially avoid youtube.com and youtu.be).
 - No duplicate or near-duplicate queries.
 
 Respond as JSON with keys "rationale" (string) and "query" (list of strings)."""
@@ -589,6 +626,40 @@ def _build_section_synthesis_payload(
     return "\n\n---\n\n".join(parts)
 
 
+def _allowed_tier_set(cfg: Configuration) -> set[str]:
+    raw = cfg.allowed_evidence_tiers.strip()
+    if not raw:
+        return {"reputable"}
+    return {part.strip().lower() for part in raw.split(",") if part.strip()}
+
+
+def _quality_gate_status(
+    state: OverallState, cfg: Configuration
+) -> tuple[bool, list[str], int, int]:
+    allowed_by_section = state.get("section_allowed_evidence", {})
+    section_evidence = state.get("section_evidence", {})
+    section_order = state.get("section_order", [])
+    total_allowed = sum(len(items) for items in allowed_by_section.values())
+    total_reputable = 0
+    for items in section_evidence.values():
+        for ev in items:
+            if str(ev.get("source_quality_tier", "")).lower() == "reputable":
+                total_reputable += 1
+    gap_sections: list[str] = []
+    for section_id in section_order:
+        count = len(allowed_by_section.get(section_id, []))
+        if count < cfg.min_allowed_evidence_per_section:
+            gap_sections.append(section_id)
+    meets_total = total_allowed >= cfg.min_allowed_evidence_total
+    meets_reputable = total_reputable >= cfg.min_reputable_evidence_total
+    return (
+        meets_total and not gap_sections and meets_reputable,
+        gap_sections,
+        total_allowed,
+        total_reputable,
+    )
+
+
 def plan_research(state: OverallState, config: RunnableConfig) -> OverallState:
     cfg = Configuration.from_runnable_config(config)
     llm = _make_llm(cfg.query_generator_model)
@@ -617,12 +688,16 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
     plan = ResearchPlan.model_validate(plan_obj) if plan_obj else None
 
     if not plan or not plan.sections:
-        result = llm.with_structured_output(SearchQueryList).invoke(
-            QUERY_WRITER_PROMPT.format(
-                current_date=_current_date(),
-                research_topic=_get_research_topic(state["messages"]),
-                number_queries=count,
-            )
+        result = _invoke_with_provider_backoff(
+            lambda: llm.with_structured_output(SearchQueryList).invoke(
+                QUERY_WRITER_PROMPT.format(
+                    current_date=_current_date(),
+                    research_topic=_get_research_topic(state["messages"]),
+                    number_queries=count,
+                )
+            ),
+            attempts=cfg.provider_retry_attempts,
+            backoff_seconds=cfg.provider_retry_backoff_seconds,
         )
         return {
             "query_list": [
@@ -635,16 +710,20 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
     topic = _get_research_topic(state["messages"])
     for section in plan.sections:
         key_questions = "\n".join(f"- {q}" for q in section.key_questions) or "- n/a"
-        result = llm.with_structured_output(SearchQueryList).invoke(
-            SECTION_QUERY_WRITER_PROMPT.format(
-                current_date=_current_date(),
-                research_topic=topic,
-                section_id=section.id,
-                section_title=section.title,
-                section_goal=section.goal,
-                section_key_questions=key_questions,
-                number_queries=count,
-            )
+        result = _invoke_with_provider_backoff(
+            lambda: llm.with_structured_output(SearchQueryList).invoke(
+                SECTION_QUERY_WRITER_PROMPT.format(
+                    current_date=_current_date(),
+                    research_topic=topic,
+                    section_id=section.id,
+                    section_title=section.title,
+                    section_goal=section.goal,
+                    section_key_questions=key_questions,
+                    number_queries=count,
+                )
+            ),
+            attempts=cfg.provider_retry_attempts,
+            backoff_seconds=cfg.provider_retry_backoff_seconds,
         )
         for query in result.query[:count]:  # type: ignore[union-attr]
             query_list.append({"search_query": query, "section_id": section.id})
@@ -703,23 +782,48 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
             marker_lines.append(f"[{marker_id}] -> {urls[0]}")
     marker_url_mapping = "\n".join(marker_lines) or "(no citation markers found)"
 
+    allowed_tiers = _allowed_tier_set(cfg)
     evidence_items: list[dict] = []
+    allowed_items: list[dict] = []
+    allowed_snippets: list[str] = []
+    extraction_event = (
+        f"section={state['section_id']}: evidence extraction returned 0 items"
+    )
     try:
         llm = _make_llm(cfg.query_generator_model)
-        ev_result = llm.with_structured_output(EvidenceList).invoke(
-            EVIDENCE_EXTRACTION_PROMPT.format(
-                section_id=state["section_id"],
-                search_query=state["search_query"],
-                marker_url_mapping=marker_url_mapping,
-                text=text_with_citations,
-            )
+        ev_result = _invoke_with_provider_backoff(
+            lambda: llm.with_structured_output(EvidenceList).invoke(
+                EVIDENCE_EXTRACTION_PROMPT.format(
+                    section_id=state["section_id"],
+                    search_query=state["search_query"],
+                    marker_url_mapping=marker_url_mapping,
+                    text=text_with_citations,
+                )
+            ),
+            attempts=cfg.provider_retry_attempts,
+            backoff_seconds=cfg.provider_retry_backoff_seconds,
         )
         if ev_result and hasattr(ev_result, "items") and ev_result.items:
             for item in ev_result.items:  # type: ignore[union-attr]
                 item.source_url = canonicalize_url(item.source_url)
-                evidence_items.append(item.model_dump())
+                quality = score_url(item.source_url)
+                if quality.blocked:
+                    continue
+                item.source_quality_score = quality.score
+                item.source_quality_tier = quality.tier
+                item.source_quality_reason = quality.reason
+                item_dict = item.model_dump()
+                evidence_items.append(item_dict)
+                if quality.tier in allowed_tiers:
+                    allowed_items.append(item_dict)
+                    allowed_snippets.append(
+                        f"[{quality.tier} {quality.score:.2f}] {item.claim} (source: {item.source_url})"
+                    )
+        extraction_event = f"section={state['section_id']}: extracted {len(evidence_items)} evidence items"
     except Exception:
-        pass
+        extraction_event = (
+            f"section={state['section_id']}: evidence extraction failed after retries"
+        )
 
     run_id = config.get("configurable", {}).get("run_id")
     if run_id and evidence_items and os.getenv("DATABASE_URL"):
@@ -736,8 +840,14 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
         "marker_sources": marker_sources,
         "search_query": [state["search_query"]],
         "web_research_result": [text_with_citations],
+        "evidence_extraction_events": [extraction_event],
+        "quality_gate_events": [
+            f"section={state['section_id']}: reputable={len(allowed_items)}/{len(evidence_items)}"
+        ],
         "section_results": {state["section_id"]: [text_with_citations]},
         "section_evidence": {state["section_id"]: evidence_items},
+        "section_allowed_results": {state["section_id"]: allowed_snippets},
+        "section_allowed_evidence": {state["section_id"]: allowed_items},
         "section_queries": {state["section_id"]: [state["search_query"]]},
         "section_marker_sources": {state["section_id"]: marker_sources},
     }
@@ -760,10 +870,29 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         attempts=cfg.provider_retry_attempts,
         backoff_seconds=cfg.provider_retry_backoff_seconds,
     )
+    quality_gate_met, gap_sections, total_allowed, total_reputable = (
+        _quality_gate_status(state, cfg)
+    )
+    reputable_shortfall = max(0, cfg.min_reputable_evidence_total - total_reputable)
+    quality_gap = (
+        ""
+        if quality_gate_met
+        else (
+            "insufficient_reputable_evidence: "
+            f"total={total_allowed}/{cfg.min_allowed_evidence_total}, "
+            f"reputable={total_reputable}/{cfg.min_reputable_evidence_total}, "
+            f"missing_sections={','.join(gap_sections) if gap_sections else 'none'}"
+        )
+    )
     return {
         "is_sufficient": result.is_sufficient,  # type: ignore[union-attr]
         "knowledge_gap": result.knowledge_gap,  # type: ignore[union-attr]
         "follow_up_queries": result.follow_up_queries,  # type: ignore[union-attr]
+        "quality_gate_met": quality_gate_met,
+        "quality_gap_sections": gap_sections,
+        "quality_gap": quality_gap,
+        "reputable_count": total_reputable,
+        "reputable_shortfall": reputable_shortfall,
         "research_loop_count": loop_count,
         "number_of_ran_queries": len(state["search_query"]),
     }
@@ -774,9 +903,26 @@ def evaluate_research(
 ) -> str | list[Send]:
     cfg = Configuration.from_runnable_config(config)
     max_loops = state.get("max_research_loops") or cfg.max_research_loops
-    if state["is_sufficient"] or state["research_loop_count"] >= max_loops:  # type: ignore[operator]
+    if (state["is_sufficient"] and state.get("quality_gate_met", False)) or state[
+        "research_loop_count"
+    ] >= max_loops:  # type: ignore[operator]
         return "finalize_answer"
-    return [
+    gap_sections = state.get("quality_gap_sections", [])
+    follow_up_queries = list(state["follow_up_queries"])
+    if gap_sections:
+        for section_id in gap_sections:
+            follow_up_queries.append(
+                f"Find reputable sources and concrete evidence for section: {section_id}"
+            )
+    deduped_follow_ups: list[str] = []
+    seen: set[str] = set()
+    for query in follow_up_queries:
+        normalized = query.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped_follow_ups.append(normalized)
+    sends: list[Send] = [
         Send(
             "web_research",
             {
@@ -785,8 +931,41 @@ def evaluate_research(
                 "section_id": "follow_up",
             },
         )
-        for i, q in enumerate(state["follow_up_queries"])
+        for i, q in enumerate(deduped_follow_ups)
     ]
+    base_idx = len(sends)
+    for j, section_id in enumerate(gap_sections):
+        sends.append(
+            Send(
+                "web_research",
+                {
+                    "search_query": (
+                        f"Find reputable sources with concrete evidence for {section_id}"
+                    ),
+                    "id": state["number_of_ran_queries"] + base_idx + j,
+                    "section_id": section_id,
+                },
+            )
+        )
+    reputable_shortfall = int(state.get("reputable_shortfall", 0))
+    for k in range(reputable_shortfall):
+        sends.append(
+            Send(
+                "web_research",
+                {
+                    "search_query": (
+                        "Find reputable sources (edu/gov/major research orgs) with "
+                        "concrete, citable evidence for this research topic"
+                    ),
+                    "id": state["number_of_ran_queries"]
+                    + base_idx
+                    + len(gap_sections)
+                    + k,
+                    "section_id": "follow_up",
+                },
+            )
+        )
+    return sends
 
 
 def finalize_answer(state: OverallState, config: RunnableConfig) -> OverallState:
@@ -802,7 +981,7 @@ def finalize_answer(state: OverallState, config: RunnableConfig) -> OverallState
     section_payload = _build_section_synthesis_payload(
         plan=plan,
         section_order=state.get("section_order", []),
-        section_results=state.get("section_results", {}),
+        section_results=state.get("section_allowed_results", {}),
         fallback_summaries=state["web_research_result"],
     )
     result = llm.invoke(
@@ -945,11 +1124,15 @@ def run() -> int:
         "section_order": [],
         "section_results": {},
         "section_evidence": {},
+        "section_allowed_results": {},
+        "section_allowed_evidence": {},
         "section_queries": {},
         "section_marker_sources": {},
         "search_query": [],
         "web_research_result": [],
         "marker_sources": {},
+        "evidence_extraction_events": [],
+        "quality_gate_events": [],
         "sources_gathered": [],
         "research_loop_count": 0,
         "initial_search_query_count": 0,
@@ -1025,6 +1208,14 @@ def run() -> int:
                         f"  extracted {len(marker_sources)} citation markers",
                         flush=True,
                     )
+                extraction_events = update.get("evidence_extraction_events")
+                if isinstance(extraction_events, list):
+                    for event in extraction_events:
+                        print(f"  {event}", flush=True)
+                quality_events = update.get("quality_gate_events")
+                if isinstance(quality_events, list):
+                    for event in quality_events:
+                        print(f"  {event}", flush=True)
             case "reflection":
                 is_sufficient = update.get("is_sufficient")
                 loop = update.get("research_loop_count")
@@ -1042,6 +1233,9 @@ def run() -> int:
                 print(header, flush=True)
                 if gap_txt:
                     print(f'  gap="{gap_txt}"', flush=True)
+                quality_gap = update.get("quality_gap")
+                if quality_gap:
+                    print(f"  {quality_gap}", flush=True)
 
                 follow_ups = update.get("follow_up_queries")
                 if isinstance(follow_ups, list) and follow_ups:
@@ -1104,14 +1298,20 @@ def run() -> int:
                     last_values = chunk
                     query_counts = _section_counts(chunk, "section_queries")
                     evidence_counts = _section_counts(chunk, "section_results")
-                    if query_counts or evidence_counts:
+                    allowed_counts = _section_counts(chunk, "section_allowed_evidence")
+                    if query_counts or evidence_counts or allowed_counts:
                         print("  section progress:", flush=True)
-                        section_ids = sorted(set(query_counts) | set(evidence_counts))
+                        section_ids = sorted(
+                            set(query_counts)
+                            | set(evidence_counts)
+                            | set(allowed_counts)
+                        )
                         for section_id in section_ids:
                             q_count = query_counts.get(section_id, 0)
                             e_count = evidence_counts.get(section_id, 0)
+                            a_count = allowed_counts.get(section_id, 0)
                             print(
-                                f"  - {section_id}: queries={q_count} evidence={e_count}",
+                                f"  - {section_id}: queries={q_count} evidence={e_count} reputable={a_count}",
                                 flush=True,
                             )
 
@@ -1141,11 +1341,31 @@ def run() -> int:
 
     sources = last_values.get("sources_gathered", [])
     if sources:
+        # Aggregate the highest quality tier seen for each URL across all
+        # section evidence so we can label each printed source.
+        section_evidence_map: dict[str, list[dict[str, Any]]] = last_values.get(
+            "section_evidence", {}
+        )
+        url_to_tier: dict[str, tuple[float, str]] = {}
+        for items in section_evidence_map.values():
+            for ev in items:
+                ev_url = ev.get("source_url", "")
+                ev_score = float(ev.get("source_quality_score", 0.5))
+                ev_tier = str(ev.get("source_quality_tier", "neutral"))
+                if not ev_url:
+                    continue
+                prior = url_to_tier.get(ev_url)
+                if prior is None or ev_score > prior[0]:
+                    url_to_tier[ev_url] = (ev_score, ev_tier)
+
         print(f"\n--- Sources ({len(sources)}) ---")
         for s in sources:
             marker_label = s.get("marker_id")
             label = marker_label if marker_label else "?"
-            print(f"[{label}] {s.get('title', 'No title')}\n    {s.get('url', '')}")
+            url = s.get("url", "")
+            tier_info = url_to_tier.get(url)
+            tier_label = f" ({tier_info[1]} {tier_info[0]:.2f})" if tier_info else ""
+            print(f"[{label}]{tier_label} {s.get('title', 'No title')}\n    {url}")
 
     if persist:
         if db is None:

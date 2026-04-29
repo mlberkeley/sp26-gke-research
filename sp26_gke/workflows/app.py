@@ -118,7 +118,8 @@ run_button = st.button("Run", type="primary")
 
 if run_button and topic:
     run_id = str(uuid.uuid4())
-    persist = bool(os.getenv("DATABASE_URL"))
+    database_url = os.getenv("DATABASE_URL")
+    persist = bool(database_url and database_url.strip())
     db: Any | None = None
 
     inputs: dict[str, Any] = {
@@ -127,11 +128,15 @@ if run_button and topic:
         "section_order": [],
         "section_results": {},
         "section_evidence": {},
+        "section_allowed_results": {},
+        "section_allowed_evidence": {},
         "section_queries": {},
         "section_marker_sources": {},
         "search_query": [],
         "web_research_result": [],
         "marker_sources": {},
+        "evidence_extraction_events": [],
+        "quality_gate_events": [],
         "sources_gathered": [],
         "research_loop_count": 0,
         "initial_search_query_count": 0,
@@ -155,17 +160,15 @@ if run_button and topic:
     if persist:
         from sp26_gke.workflows.research_db import ResearchDB
 
-        db = ResearchDB()
+        db = ResearchDB(dsn=database_url)
         asyncio.run(db.create_run(run_id, topic, thread_id=run_id))
         asyncio.run(db.log_event(run_id, event_type="run_start"))
 
     with progress_container:
         status = st.status("Researching...", expanded=True)
 
-        with _graph_checkpointer_context(
-            persist=bool(os.getenv("DATABASE_URL"))
-        ) as saver:
-            if os.getenv("DATABASE_URL") and hasattr(saver, "setup"):
+        with _graph_checkpointer_context(persist=persist) as saver:
+            if persist and hasattr(saver, "setup"):
                 saver.setup()
             graph_runner: Any = _compile_graph_with_checkpointer(saver)
             try:
@@ -225,6 +228,16 @@ if run_button and topic:
                                     status.write(
                                         f"  extracted {len(marker_sources)} citation markers"
                                     )
+                                extraction_events = update.get(
+                                    "evidence_extraction_events"
+                                )
+                                if isinstance(extraction_events, list):
+                                    for event in extraction_events:
+                                        status.write(f"  {event}")
+                                quality_events = update.get("quality_gate_events")
+                                if isinstance(quality_events, list):
+                                    for event in quality_events:
+                                        status.write(f"  {event}")
 
                             elif node_name == "reflection":
                                 is_sufficient = update.get("is_sufficient")
@@ -244,6 +257,9 @@ if run_button and topic:
                                 status.write(header)
                                 if gap_txt:
                                     status.write(f'  gap="{gap_txt}"')
+                                quality_gap = update.get("quality_gap")
+                                if quality_gap:
+                                    status.write(f"  {quality_gap}")
 
                             elif node_name == "finalize_answer":
                                 status.write("→ Generating final report...")
@@ -318,12 +334,30 @@ if run_button and topic:
 
     sources = last_values.get("sources_gathered", [])
     if sources:
+        section_evidence_map: dict[str, list[dict[str, Any]]] = last_values.get(
+            "section_evidence", {}
+        )
+        url_to_tier: dict[str, tuple[float, str]] = {}
+        for items in section_evidence_map.values():
+            for ev in items:
+                ev_url = ev.get("source_url", "")
+                ev_score = float(ev.get("source_quality_score", 0.5))
+                ev_tier = str(ev.get("source_quality_tier", "neutral"))
+                if not ev_url:
+                    continue
+                prior = url_to_tier.get(ev_url)
+                if prior is None or ev_score > prior[0]:
+                    url_to_tier[ev_url] = (ev_score, ev_tier)
         with sources_placeholder.expander(f"Sources ({len(sources)})", expanded=False):
             for s in sources:
                 marker_label = s.get("marker_id", "?")
                 title = s.get("title", "No title")
                 url = s.get("url", "")
-                st.markdown(f"**[{marker_label}]** {title}  \n{url}")
+                tier_info = url_to_tier.get(url)
+                tier_label = (
+                    f" ({tier_info[1]} {tier_info[0]:.2f})" if tier_info else ""
+                )
+                st.markdown(f"**[{marker_label}]**{tier_label} {title}  \n{url}")
 
     section_evidence: dict[str, list[dict[str, Any]]] = last_values.get(
         "section_evidence", {}
@@ -338,7 +372,11 @@ if run_button and topic:
                     for ev in items:
                         claim = ev.get("claim", "")
                         url = ev.get("source_url", "")
-                        st.markdown(f"- {claim}  \n  [source]({url})")
+                        tier = ev.get("source_quality_tier", "neutral")
+                        score = float(ev.get("source_quality_score", 0.5))
+                        st.markdown(
+                            f"- `[{tier} {score:.2f}]` {claim}  \n  [source]({url})"
+                        )
 
     if node_latest_state:
         with node_states_placeholder.container():
