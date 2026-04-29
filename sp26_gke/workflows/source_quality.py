@@ -18,7 +18,7 @@ _VALID_HOST_RE = re.compile(r"^[a-z0-9.\-:\[\]]+$")
 # Authoritative top-level domains
 AUTHORITATIVE_TLDS: frozenset[str] = frozenset({"gov", "edu", "mil", "int"})
 
-# Second-level academic/government suffixes (e.g. cam.ac.uk, nih.go.jp).
+# academic/government suffixes (e.g. cam.ac.uk, nih.go.jp).
 AUTHORITATIVE_SECOND_LEVELS: frozenset[str] = frozenset(
     {
         "ac.uk",
@@ -37,7 +37,7 @@ AUTHORITATIVE_SECOND_LEVELS: frozenset[str] = frozenset(
     }
 )
 
-# allowlist of well-known reputable publishers and organizations
+# allowlist of reputable organizations
 ALLOWLIST_DOMAINS: frozenset[str] = frozenset(
     {
         "nature.com",
@@ -68,12 +68,14 @@ ALLOWLIST_DOMAINS: frozenset[str] = frozenset(
 )
 
 # Domains hard-dropped before evidence is persisted.
-# Kept empty for the current PoC.
+# Kept empty for the current POC - can add to later
 BLOCKLIST_DOMAINS: frozenset[str] = frozenset()
 
-# User-generated / aggregator domains kept but tagged as low quality.
+# user-generated / aggregator domains kept but tagged as low quality.
 LOW_QUALITY_DOMAINS: frozenset[str] = frozenset(
     {
+        "youtube.com",
+        "youtu.be",
         "reddit.com",
         "quora.com",
         "pinterest.com",

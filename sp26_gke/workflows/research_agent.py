@@ -302,6 +302,11 @@ Topic: {research_topic}
 Rules:
 - Prefer a single query unless the topic has multiple distinct aspects
 - Queries must be specific and likely to return current, authoritative results
+- Prefer institutional and primary sources by adding domain constraints where relevant
+  (e.g. site:.gov, site:.edu, site:who.int, site:oecd.org, site:worldbank.org,
+  site:un.org, site:europa.eu, or topic-specific standards bodies/journals)
+- Avoid entertainment/video-first domains unless explicitly required by the topic
+  (especially avoid youtube.com and youtu.be)
 - No duplicate or near-duplicate queries
 
 Respond as JSON with keys "rationale" (string) and "query" (list of strings)."""
@@ -318,6 +323,11 @@ Section key questions:
 Rules:
 - Focus only on this section's scope.
 - Queries must be specific and likely to return current, authoritative results.
+- Prefer institutional and primary sources by adding domain constraints where relevant
+  (e.g. site:.gov, site:.edu, site:who.int, site:oecd.org, site:worldbank.org,
+  site:un.org, site:europa.eu, or topic-specific standards bodies/journals).
+- Avoid entertainment/video-first domains unless explicitly required by the topic
+  (especially avoid youtube.com and youtu.be).
 - No duplicate or near-duplicate queries.
 
 Respond as JSON with keys "rationale" (string) and "query" (list of strings)."""
@@ -631,12 +641,16 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
     plan = ResearchPlan.model_validate(plan_obj) if plan_obj else None
 
     if not plan or not plan.sections:
-        result = llm.with_structured_output(SearchQueryList).invoke(
-            QUERY_WRITER_PROMPT.format(
-                current_date=_current_date(),
-                research_topic=_get_research_topic(state["messages"]),
-                number_queries=count,
-            )
+        result = _invoke_with_provider_backoff(
+            lambda: llm.with_structured_output(SearchQueryList).invoke(
+                QUERY_WRITER_PROMPT.format(
+                    current_date=_current_date(),
+                    research_topic=_get_research_topic(state["messages"]),
+                    number_queries=count,
+                )
+            ),
+            attempts=cfg.provider_retry_attempts,
+            backoff_seconds=cfg.provider_retry_backoff_seconds,
         )
         return {
             "query_list": [
@@ -649,16 +663,20 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
     topic = _get_research_topic(state["messages"])
     for section in plan.sections:
         key_questions = "\n".join(f"- {q}" for q in section.key_questions) or "- n/a"
-        result = llm.with_structured_output(SearchQueryList).invoke(
-            SECTION_QUERY_WRITER_PROMPT.format(
-                current_date=_current_date(),
-                research_topic=topic,
-                section_id=section.id,
-                section_title=section.title,
-                section_goal=section.goal,
-                section_key_questions=key_questions,
-                number_queries=count,
-            )
+        result = _invoke_with_provider_backoff(
+            lambda: llm.with_structured_output(SearchQueryList).invoke(
+                SECTION_QUERY_WRITER_PROMPT.format(
+                    current_date=_current_date(),
+                    research_topic=topic,
+                    section_id=section.id,
+                    section_title=section.title,
+                    section_goal=section.goal,
+                    section_key_questions=key_questions,
+                    number_queries=count,
+                )
+            ),
+            attempts=cfg.provider_retry_attempts,
+            backoff_seconds=cfg.provider_retry_backoff_seconds,
         )
         for query in result.query[:count]:  # type: ignore[union-attr]
             query_list.append({"search_query": query, "section_id": section.id})
