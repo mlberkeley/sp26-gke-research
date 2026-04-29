@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import operator
 import os
-import re
 import sys
 import threading
 import time
@@ -153,6 +153,8 @@ class OverallState(TypedDict):
     marker_sources: Annotated[dict[int, list[dict[str, str]]], merge_marker_sources]
     evidence_extraction_events: Annotated[list[str], operator.add]
     quality_gate_events: Annotated[list[str], operator.add]
+    paragraph_evidence_mappings: Annotated[list[dict[str, Any]], operator.add]
+    unsupported_paragraphs: Annotated[list[dict[str, str]], operator.add]
     sources_gathered: Annotated[list, operator.add]
     initial_search_query_count: int
     max_research_loops: int
@@ -246,6 +248,23 @@ class EvidenceList(BaseModel):
         description="All atomic evidence objects extracted from this web research step. "
         "One object per claim per source."
     )
+
+
+class MappedParagraph(BaseModel):
+    text: str = Field(description="Paragraph text for this section.")
+    evidence_ids: list[str] = Field(
+        default_factory=list,
+        description="Evidence IDs from the section payload that support this paragraph.",
+    )
+
+
+class MappedSection(BaseModel):
+    section_id: str = Field(description="Section id this content belongs to.")
+    paragraphs: list[MappedParagraph] = Field(default_factory=list)
+
+
+class MappedReport(BaseModel):
+    sections: list[MappedSection] = Field(default_factory=list)
 
 
 class PlanSection(BaseModel):
@@ -384,6 +403,25 @@ Before finalizing, perform an internal checklist:
 3) No extra top-level headings were added.
 Do not print the checklist."""
 
+ANSWER_MAPPED_PROMPT = """Compose a sectioned research report from evidence cards.
+Current date: {current_date}
+Topic: {research_topic}
+
+Planned section order:
+{section_order}
+
+Evidence payload:
+{summaries}
+
+Hard rules:
+- Output must match the provided structured schema exactly.
+- Use only evidence IDs provided for that section.
+- Do not invent evidence IDs.
+- Each paragraph should be grounded to one or more evidence IDs when possible.
+- Keep paragraphs concise and factual.
+- Do not include citation markers like [1] in paragraph text.
+"""
+
 
 # ── Citation helpers ─────────────────────────────────────────────────────────
 
@@ -488,8 +526,21 @@ def canonicalize_url(url: str) -> str:
         return url
     try:
         with httpx.Client() as client:
-            r = client.head(url, follow_redirects=True, timeout=5.0)
-            return str(r.url)
+            headers = {"User-Agent": "Mozilla/5.0"}
+            try:
+                r = client.head(
+                    url, follow_redirects=True, timeout=5.0, headers=headers
+                )
+                resolved = str(r.url)
+                if resolved and "grounding-api-redirect" not in resolved:
+                    return resolved
+            except Exception:
+                pass
+            r = client.get(url, follow_redirects=True, timeout=8.0, headers=headers)
+            resolved = str(r.url)
+            if resolved and "grounding-api-redirect" not in resolved:
+                return resolved
+            return resolved or url
     except Exception:
         return url
 
@@ -587,6 +638,101 @@ def _plan_to_brief(plan: ResearchPlan) -> str:
     return "\n".join(lines)
 
 
+def _coerce_research_plan(plan_obj: Any) -> ResearchPlan | None:
+    """Normalize stored plan payloads across reruns/reloads."""
+    if plan_obj is None:
+        return None
+    if isinstance(plan_obj, ResearchPlan):
+        return plan_obj
+    if isinstance(plan_obj, dict):
+        return ResearchPlan.model_validate(plan_obj)
+    if isinstance(plan_obj, BaseModel):
+        return ResearchPlan.model_validate(plan_obj.model_dump())
+    raise TypeError(f"Unsupported plan payload type: {type(plan_obj)!r}")
+
+
+def _evidence_id(section_id: str, evidence: dict[str, Any]) -> str:
+    key = (
+        f"{section_id}|{evidence.get('claim', '')}|{evidence.get('source_url', '')}|"
+        f"{evidence.get('retrieval_query', '')}"
+    )
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+
+
+def _build_section_evidence_index(
+    section_allowed_evidence: dict[str, list[dict[str, Any]]],
+) -> dict[str, dict[str, dict[str, Any]]]:
+    out: dict[str, dict[str, dict[str, Any]]] = {}
+    for section_id, items in section_allowed_evidence.items():
+        section_map: dict[str, dict[str, Any]] = {}
+        for ev in items:
+            if not isinstance(ev, dict):
+                continue
+            ev_id = _evidence_id(section_id, ev)
+            section_map.setdefault(ev_id, ev)
+        out[section_id] = section_map
+    return out
+
+
+def _build_source_title_lookup(
+    marker_sources: dict[int, list[dict[str, str]]],
+) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    for sources in marker_sources.values():
+        for src in sources:
+            raw_url = str(src.get("url", "")).strip()
+            title = str(src.get("title", "")).strip()
+            if not raw_url:
+                continue
+            canonical = canonicalize_url(raw_url)
+            if canonical:
+                lookup.setdefault(canonical, title or canonical)
+            lookup.setdefault(raw_url, title or canonical or raw_url)
+    return lookup
+
+
+def _build_evidence_first_payload(
+    *,
+    plan: ResearchPlan | None,
+    section_order: list[str],
+    section_evidence_index: dict[str, dict[str, dict[str, Any]]],
+    max_evidence_per_section: int = 8,
+) -> str:
+    section_map: dict[str, PlanSection] = {}
+    if plan:
+        section_map = {section.id: section for section in plan.sections}
+    parts: list[str] = []
+    for idx, section_id in enumerate(section_order, 1):
+        section = section_map.get(section_id)
+        title = section.title if section else section_id.replace("_", " ").title()
+        goal = section.goal if section else "Summarize findings for this section."
+        evidence_cards: list[str] = []
+        for ev_id, ev in list(section_evidence_index.get(section_id, {}).items())[
+            :max_evidence_per_section
+        ]:
+            claim = str(ev.get("claim", "")).replace("\n", " ").strip()
+            source_url = str(ev.get("source_url", "")).strip()
+            tier = str(ev.get("source_quality_tier", "neutral")).strip()
+            score = float(ev.get("source_quality_score", 0.5))
+            evidence_cards.append(
+                f"- id={ev_id} | tier={tier} {score:.2f} | url={source_url} | claim={claim}"
+            )
+        evidence_text = "\n".join(evidence_cards) or "- (no evidence cards)"
+        parts.append(
+            "\n".join(
+                [
+                    f"SECTION {idx}",
+                    f"id: {section_id}",
+                    f"title: {title}",
+                    f"goal: {goal}",
+                    "evidence_cards:",
+                    evidence_text,
+                ]
+            )
+        )
+    return "\n\n---\n\n".join(parts)
+
+
 def _build_section_synthesis_payload(
     *,
     plan: ResearchPlan | None,
@@ -669,7 +815,7 @@ def plan_research(state: OverallState, config: RunnableConfig) -> OverallState:
             research_topic=_get_research_topic(state["messages"]),
         )
     )
-    plan = ResearchPlan.model_validate(result)
+    plan: ResearchPlan = ResearchPlan.model_validate(result)
     plan_brief = _plan_to_brief(plan)
     return {  # type: ignore[typeddict-item]
         "messages": [AIMessage(content=plan_brief)],
@@ -684,8 +830,7 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
     max_queries_per_run = max(1, cfg.max_queries_per_run)
 
     llm = _make_llm(cfg.query_generator_model)
-    plan_obj = state.get("plan")
-    plan = ResearchPlan.model_validate(plan_obj) if plan_obj else None
+    plan = _coerce_research_plan(state.get("plan"))
 
     if not plan or not plan.sections:
         result = _invoke_with_provider_backoff(
@@ -776,8 +921,31 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
 
     # Build marker -> URL mapping string for the extraction prompt.
     marker_lines: list[str] = []
+    normalized_marker_sources: dict[int, list[dict[str, str]]] = {}
     for marker_id, srcs in sorted(marker_sources.items()):
-        urls = [s.get("url", "") for s in srcs if s.get("url")]
+        normalized_sources: list[dict[str, str]] = []
+        for src in srcs:
+            raw_url = str(src.get("url", "")).strip()
+            if not raw_url:
+                continue
+            normalized_url = canonicalize_url(raw_url)
+            normalized_sources.append(
+                {
+                    "url": normalized_url or raw_url,
+                    "title": str(src.get("title", "")).strip(),
+                }
+            )
+        deduped_sources: dict[str, dict[str, str]] = {}
+        for src in normalized_sources:
+            u = src.get("url", "")
+            if u and u not in deduped_sources:
+                deduped_sources[u] = src
+        normalized_marker_sources[marker_id] = list(deduped_sources.values())
+        urls = [
+            s.get("url", "")
+            for s in normalized_marker_sources[marker_id]
+            if s.get("url")
+        ]
         if urls:
             marker_lines.append(f"[{marker_id}] -> {urls[0]}")
     marker_url_mapping = "\n".join(marker_lines) or "(no citation markers found)"
@@ -837,7 +1005,7 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
             pass
 
     return {  # type: ignore[typeddict-item]
-        "marker_sources": marker_sources,
+        "marker_sources": normalized_marker_sources,
         "search_query": [state["search_query"]],
         "web_research_result": [text_with_citations],
         "evidence_extraction_events": [extraction_event],
@@ -849,7 +1017,7 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
         "section_allowed_results": {state["section_id"]: allowed_snippets},
         "section_allowed_evidence": {state["section_id"]: allowed_items},
         "section_queries": {state["section_id"]: [state["search_query"]]},
-        "section_marker_sources": {state["section_id"]: marker_sources},
+        "section_marker_sources": {state["section_id"]: normalized_marker_sources},
     }
 
 
@@ -976,51 +1144,126 @@ def finalize_answer(state: OverallState, config: RunnableConfig) -> OverallState
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
     )
-    plan_obj = state.get("plan")
-    plan = ResearchPlan.model_validate(plan_obj) if plan_obj else None
-    section_payload = _build_section_synthesis_payload(
+    plan = _coerce_research_plan(state.get("plan"))
+    section_order = state.get("section_order", [])
+    section_index = _build_section_evidence_index(
+        state.get("section_allowed_evidence", {})
+    )
+    section_payload = _build_evidence_first_payload(
         plan=plan,
-        section_order=state.get("section_order", []),
-        section_results=state.get("section_allowed_results", {}),
-        fallback_summaries=state["web_research_result"],
+        section_order=section_order,
+        section_evidence_index=section_index,
     )
-    result = llm.invoke(
-        ANSWER_PROMPT.format(
-            current_date=_current_date(),
-            research_topic=_get_research_topic(state["messages"]),
-            section_order=", ".join(state.get("section_order", [])),
-            summaries=section_payload,
+    mapped_raw = _invoke_with_provider_backoff(
+        lambda: llm.with_structured_output(MappedReport).invoke(
+            ANSWER_MAPPED_PROMPT.format(
+                current_date=_current_date(),
+                research_topic=_get_research_topic(state["messages"]),
+                section_order=", ".join(section_order),
+                summaries=section_payload,
+            )
+        ),
+        attempts=cfg.provider_retry_attempts,
+        backoff_seconds=cfg.provider_retry_backoff_seconds,
+    )
+    mapped_result: MappedReport = MappedReport.model_validate(mapped_raw)
+
+    section_map: dict[str, PlanSection] = {}
+    if isinstance(plan, ResearchPlan):
+        section_map = {section.id: section for section in plan.sections}
+    generated_sections = {
+        section.section_id: section for section in mapped_result.sections
+    }
+    source_title_lookup = _build_source_title_lookup(state.get("marker_sources", {}))
+
+    url_to_marker: dict[str, int] = {}
+    marker_sources: dict[int, dict[str, str]] = {}
+    paragraph_mappings: list[dict[str, Any]] = []
+    unsupported: list[dict[str, str]] = []
+    rendered_sections: list[str] = []
+
+    for section_id in section_order:
+        section_info = section_map.get(section_id)
+        section_title = (
+            section_info.title if section_info else section_id.replace("_", " ").title()
         )
-    )
+        rendered_sections.append(f"## [{section_id}] {section_title}")
+        section_out = generated_sections.get(section_id)
+        paragraphs = section_out.paragraphs if section_out else []
+        if not paragraphs:
+            rendered_sections.append("Gaps: insufficient evidence for this section.")
+            continue
 
-    answer_text = _content_to_text(result.content)
-    marker_id_strs = re.findall(r"\[(\d+)\]", answer_text)
-    marker_ids = sorted({int(mid) for mid in marker_id_strs if mid})
+        for paragraph_idx, paragraph in enumerate(paragraphs, 1):
+            valid_ids = [
+                ev_id
+                for ev_id in paragraph.evidence_ids
+                if ev_id in section_index.get(section_id, {})
+            ]
+            support_urls: list[str] = []
+            for ev_id in valid_ids:
+                ev_obj = section_index[section_id][ev_id]
+                ev_url = str(ev_obj.get("source_url", "")).strip()
+                if ev_url:
+                    support_urls.append(ev_url)
+            support_urls = sorted(set(support_urls))
 
-    marker_sources: dict[int, list[dict[str, str]]] = state.get("marker_sources", {})
-    entries: list[dict[str, str]] = []
-    seen_entries: set[tuple[int, str]] = set()
+            markers: list[int] = []
+            for url in support_urls:
+                marker_id = url_to_marker.get(url)
+                if marker_id is None:
+                    marker_id = len(url_to_marker) + 1
+                    url_to_marker[url] = marker_id
+                    source_title = source_title_lookup.get(url, url)
+                    marker_sources[marker_id] = {
+                        "title": source_title,
+                        "url": url,
+                    }
+                markers.append(marker_id)
 
-    for marker_id in marker_ids:
-        for src in marker_sources.get(marker_id, []):
-            url = src.get("url", "")
-            if not url:
-                continue
-            key = (marker_id, url)
-            if key in seen_entries:
-                continue
-            seen_entries.add(key)
-            entries.append(
+            supported = bool(valid_ids)
+            paragraph_text = paragraph.text.strip()
+            marker_text = " ".join(f"[{marker_id}]" for marker_id in markers)
+            rendered = paragraph_text
+            if marker_text:
+                rendered = f"{rendered} {marker_text}".strip()
+            if not supported:
+                rendered = (
+                    f"{rendered}\n\nUnsupported (no mapped evidence object).".strip()
+                )
+                unsupported.append(
+                    {
+                        "section_id": section_id,
+                        "paragraph": paragraph_text,
+                        "reason": "no_valid_evidence_ids",
+                    }
+                )
+            rendered_sections.append(rendered)
+            paragraph_mappings.append(
                 {
-                    "marker_id": str(marker_id),
-                    "title": src.get("title", "No title"),
-                    "url": url,
+                    "section_id": section_id,
+                    "paragraph_index": paragraph_idx,
+                    "evidence_ids": valid_ids,
+                    "supported": supported,
                 }
             )
+        rendered_sections.append("")
+
+    answer_text = "\n\n".join(rendered_sections).strip()
+    entries = [
+        {
+            "marker_id": str(marker_id),
+            "title": src["title"],
+            "url": src["url"],
+        }
+        for marker_id, src in sorted(marker_sources.items(), key=lambda item: item[0])
+    ]
 
     return {
         "messages": [AIMessage(content=answer_text)],
         "sources_gathered": entries,
+        "paragraph_evidence_mappings": paragraph_mappings,
+        "unsupported_paragraphs": unsupported,
     }  # type: ignore[typeddict-item]
 
 
@@ -1133,6 +1376,8 @@ def run() -> int:
         "marker_sources": {},
         "evidence_extraction_events": [],
         "quality_gate_events": [],
+        "paragraph_evidence_mappings": [],
+        "unsupported_paragraphs": [],
         "sources_gathered": [],
         "research_loop_count": 0,
         "initial_search_query_count": 0,
