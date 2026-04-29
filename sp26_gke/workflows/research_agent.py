@@ -33,6 +33,8 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Send
 from pydantic import BaseModel, Field, field_validator
 
+from sp26_gke.workflows.source_quality import score_url
+
 try:
     from langgraph.checkpoint.postgres import (  # type: ignore[import-not-found]
         PostgresSaver as _PostgresSaver,
@@ -197,6 +199,18 @@ class Evidence(BaseModel):
     source_url: str = Field(description="The URL this claim came from")
     retrieval_query: str = Field(
         description="The search query that surfaced this source"
+    )
+    source_quality_score: float = Field(
+        default=0.5,
+        description="Domain-policy quality score in [0, 1]; populated post-extraction.",
+    )
+    source_quality_tier: str = Field(
+        default="neutral",
+        description="Quality tier label (authoritative/reputable/neutral/low/blocked).",
+    )
+    source_quality_reason: str = Field(
+        default="default",
+        description="Reason the tier was assigned (allowlist/authoritative_tld/etc).",
     )
 
     @field_validator("claim")
@@ -717,6 +731,12 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
         if ev_result and hasattr(ev_result, "items") and ev_result.items:
             for item in ev_result.items:  # type: ignore[union-attr]
                 item.source_url = canonicalize_url(item.source_url)
+                quality = score_url(item.source_url)
+                if quality.blocked:
+                    continue
+                item.source_quality_score = quality.score
+                item.source_quality_tier = quality.tier
+                item.source_quality_reason = quality.reason
                 evidence_items.append(item.model_dump())
     except Exception:
         pass
@@ -1141,11 +1161,31 @@ def run() -> int:
 
     sources = last_values.get("sources_gathered", [])
     if sources:
+        # Aggregate the highest quality tier seen for each URL across all
+        # section evidence so we can label each printed source.
+        section_evidence_map: dict[str, list[dict[str, Any]]] = last_values.get(
+            "section_evidence", {}
+        )
+        url_to_tier: dict[str, tuple[float, str]] = {}
+        for items in section_evidence_map.values():
+            for ev in items:
+                ev_url = ev.get("source_url", "")
+                ev_score = float(ev.get("source_quality_score", 0.5))
+                ev_tier = str(ev.get("source_quality_tier", "neutral"))
+                if not ev_url:
+                    continue
+                prior = url_to_tier.get(ev_url)
+                if prior is None or ev_score > prior[0]:
+                    url_to_tier[ev_url] = (ev_score, ev_tier)
+
         print(f"\n--- Sources ({len(sources)}) ---")
         for s in sources:
             marker_label = s.get("marker_id")
             label = marker_label if marker_label else "?"
-            print(f"[{label}] {s.get('title', 'No title')}\n    {s.get('url', '')}")
+            url = s.get("url", "")
+            tier_info = url_to_tier.get(url)
+            tier_label = f" ({tier_info[1]} {tier_info[0]:.2f})" if tier_info else ""
+            print(f"[{label}]{tier_label} {s.get('title', 'No title')}\n    {url}")
 
     if persist:
         if db is None:
