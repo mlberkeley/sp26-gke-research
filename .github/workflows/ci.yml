@@ -18,11 +18,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout branch
-        uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           fetch-depth: 0
       - name: Set up pixi
-        uses: prefix-dev/setup-pixi@a0af7a228712d6121d37aba47adf55c1332c9c2e
+        uses: prefix-dev/setup-pixi@5185adfbffb4bd703da3010310260805d89ebb11
         with:
           environments: default lint
       - name: pre-commit
@@ -40,9 +40,9 @@ jobs:
         with_optionals: [false]
     steps:
       - name: Checkout branch
-        uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
       - name: Set up pixi
-        uses: prefix-dev/setup-pixi@a0af7a228712d6121d37aba47adf55c1332c9c2e
+        uses: prefix-dev/setup-pixi@5185adfbffb4bd703da3010310260805d89ebb11
         with:
           environments: ${{ matrix.environment }}
       - name: Install repository
